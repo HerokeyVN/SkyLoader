@@ -448,13 +448,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   const std::wstring directory = moduleDirectory();
   gIniPath = directory + L"\\SkyLoader.ini";
 
-  WNDCLASSW windowClass{};
+  WNDCLASSEXW windowClass{};
+  windowClass.cbSize = sizeof(windowClass);
   windowClass.hInstance = instance;
   windowClass.lpszClassName = L"SkyLoaderWindow";
   windowClass.lpfnWndProc = windowProc;
   windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-  if (!RegisterClassW(&windowClass)) return 1;
+  windowClass.hIcon = static_cast<HICON>(LoadImageW(instance, L"IDI_SKYLOADER_ICON", IMAGE_ICON,
+                                                     GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+                                                     LR_DEFAULTCOLOR));
+  windowClass.hIconSm = static_cast<HICON>(LoadImageW(instance, L"IDI_SKYLOADER_ICON", IMAGE_ICON,
+                                                       GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+                                                       LR_DEFAULTCOLOR));
+  if (!windowClass.hIcon) windowClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+  if (!windowClass.hIconSm) windowClass.hIconSm = windowClass.hIcon;
+  if (!RegisterClassExW(&windowClass)) return 1;
 
   HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"SkyLoader",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 520,

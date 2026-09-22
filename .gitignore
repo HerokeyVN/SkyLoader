@@ -2,6 +2,7 @@
 dist/*.exe
 dist/*.dll
 dist/*.log
+dist/*.res
 dist/*-vulkan-layer.json
 dist/installer/
 

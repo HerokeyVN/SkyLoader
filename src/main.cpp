@@ -49,6 +49,11 @@ std::wstring normalizedPath(const std::wstring& path) {
   return count && count < MAX_PATH ? std::wstring(full) : path;
 }
 
+std::wstring fileNameOnly(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
 std::wstring managedPluginDirectory() {
   wchar_t localAppData[MAX_PATH]{};
   if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, localAppData) != S_OK)
@@ -66,8 +71,7 @@ bool importPlugin(const std::wstring& source, std::wstring& destination, std::ws
     error = L"Could not create the managed plugin directory.";
     return false;
   }
-  const size_t slash = source.find_last_of(L"\\/");
-  const std::wstring filename = slash == std::wstring::npos ? source : source.substr(slash + 1);
+  const std::wstring filename = fileNameOnly(source);
   const size_t dot = filename.find_last_of(L'.');
   const std::wstring stem = dot == std::wstring::npos ? filename : filename.substr(0, dot);
   const std::wstring extension = dot == std::wstring::npos ? L".dll" : filename.substr(dot);
@@ -102,7 +106,8 @@ void populateDllList() {
     LVITEMW item{};
     item.mask = LVIF_TEXT;
     item.iItem = static_cast<int>(i);
-    item.pszText = const_cast<wchar_t*>(gDllPaths[i].c_str());
+    const std::wstring displayName = fileNameOnly(gDllPaths[i]);
+    item.pszText = const_cast<wchar_t*>(displayName.c_str());
     ListView_InsertItem(gDllList, &item);
   }
 }
@@ -259,7 +264,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
       ListView_SetExtendedListViewStyle(gDllList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
       LVCOLUMNW column{};
       column.mask = LVCF_TEXT | LVCF_WIDTH;
-      column.pszText = const_cast<wchar_t*>(L"DLL path");
+       column.pszText = const_cast<wchar_t*>(L"Plugin");
       column.cx = 600;
       ListView_InsertColumn(gDllList, 0, &column);
       CreateWindowW(L"BUTTON", L"Add DLL...", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdAddDll), nullptr, nullptr);

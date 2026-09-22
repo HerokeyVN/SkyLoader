@@ -2,8 +2,6 @@
 
 SkyLoader is a Windows launcher and local DLL manager for **Sky: Children of the Light**. It starts Sky through Steam, injects `SkyBootstrap.dll` as soon as the configured game process appears, and asks Bootstrap to load registered DLLs as plugins.
 
-The project is intentionally local-only: it does not download plugins, modify the game installation, or contact a server.
-
 ## Features
 
 - Launch Sky through Steam using `steam://run/2325290`.

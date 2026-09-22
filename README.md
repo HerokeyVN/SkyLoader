@@ -7,6 +7,7 @@ SkyLoader is a Windows launcher and local DLL manager for **Sky: Children of the
 - Launch Sky through Steam using `steam://run/2325290`.
 - Match the configured, canonical `Sky.exe` path before injecting.
 - Persist the game path and plugin list in `SkyLoader.ini`.
+- Import DLLs into `%LOCALAPPDATA%\SkyLoader\plugins` so the registered copy is independent of the source file.
 - Inject the Bootstrap host before loading registered plugins.
 - Load additional DLLs through a named pipe without copying them into the game directory.
 - Provide a Vulkan implicit layer for swapchain and present lifecycle integration.
@@ -41,7 +42,7 @@ Sky.exe
 - **OverlaySession** owns Vulkan resources for one device/swapchain pair. Swapchain recreation creates a new session and destroys the old one.
 - **Plugins** own their feature logic and ImGui context. Bootstrap supplies the Vulkan context and command buffer.
 
-More project terminology is documented in [CONTEXT.md](CONTEXT.md). The session-registry decision is recorded in [ADR 0001](docs/adr/0001-overlay-session-registry.md).
+The session-registry decision is recorded in [ADR 0001](docs/adr/0001-overlay-session-registry.md).
 
 ## Requirements
 
@@ -104,7 +105,7 @@ The old staged Vulkan keys are ignored for compatibility. `EnableOverlay=1` enab
 
 1. Start `SkyLoader.exe`.
 2. Verify the `Sky.exe` path with **Browse Sky...**, or keep the Steam default.
-3. Add one or more 64-bit DLLs with **Add DLL...**.
+3. Add one or more 64-bit DLLs with **Add DLL...**. SkyLoader copies each DLL into its managed plugin directory and uses that copy for injection.
 4. Press **Launch Sky**. SkyLoader opens Steam instead of executing `Sky.exe` directly.
 5. SkyLoader waits for the configured executable, injects Bootstrap, then sends plugin-load requests.
 
@@ -162,7 +163,7 @@ If the overlay does not appear:
 4. Check `SkyBootstrap.log` for layer negotiation, swapchain, and plugin-init messages.
 5. Rebuild both the loader and Bootstrap; do not mix binaries from different builds.
 
-If Sky starts but the plugin is absent, verify that the DLL exists at the exact path stored in `SkyLoader.ini` and that its dependencies are available to `Sky.exe`.
+If Sky starts but the plugin is absent, verify that the managed DLL exists at the exact path stored in `SkyLoader.ini` and that its dependencies are available to `Sky.exe`.
 
 ## Known limitations
 

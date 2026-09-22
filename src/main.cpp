@@ -3,6 +3,7 @@
 #include <commdlg.h>
 #include <tlhelp32.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <string>
@@ -46,6 +47,38 @@ std::wstring normalizedPath(const std::wstring& path) {
   wchar_t full[MAX_PATH]{};
   const DWORD count = GetFullPathNameW(path.c_str(), MAX_PATH, full, nullptr);
   return count && count < MAX_PATH ? std::wstring(full) : path;
+}
+
+std::wstring managedPluginDirectory() {
+  wchar_t localAppData[MAX_PATH]{};
+  if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, localAppData) != S_OK)
+    return L"";
+  const std::wstring root = std::wstring(localAppData) + L"\\SkyLoader";
+  const std::wstring directory = root + L"\\plugins";
+  CreateDirectoryW(root.c_str(), nullptr);
+  CreateDirectoryW(directory.c_str(), nullptr);
+  return GetFileAttributesW(directory.c_str()) != INVALID_FILE_ATTRIBUTES ? directory : L"";
+}
+
+bool importPlugin(const std::wstring& source, std::wstring& destination, std::wstring& error) {
+  const std::wstring directory = managedPluginDirectory();
+  if (directory.empty()) {
+    error = L"Could not create the managed plugin directory.";
+    return false;
+  }
+  const size_t slash = source.find_last_of(L"\\/");
+  const std::wstring filename = slash == std::wstring::npos ? source : source.substr(slash + 1);
+  const size_t dot = filename.find_last_of(L'.');
+  const std::wstring stem = dot == std::wstring::npos ? filename : filename.substr(0, dot);
+  const std::wstring extension = dot == std::wstring::npos ? L".dll" : filename.substr(dot);
+  destination = directory + L"\\" + stem + L"." + std::to_wstring(GetTickCount64()) + extension;
+  if (!CopyFileW(source.c_str(), destination.c_str(), FALSE)) {
+    error = L"Could not copy the DLL into the managed plugin directory (" +
+            std::to_wstring(GetLastError()) + L").";
+    destination.clear();
+    return false;
+  }
+  return true;
 }
 
 bool samePath(const std::wstring& first, const std::wstring& second) {
@@ -278,14 +311,16 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case kIdAddDll: {
           std::wstring path;
           if (chooseFile(window, L"Dynamic-link libraries\0*.dll\0\0", path)) {
-            const bool exists = std::any_of(gDllPaths.begin(), gDllPaths.end(), [&](const std::wstring& saved) { return samePath(saved, path); });
-            if (exists) setStatus(L"This DLL is already registered.");
-            else {
-              gDllPaths.push_back(path);
-              populateDllList();
-              saveSettings();
-              setStatus(L"DLL added. The original file remains in its current location.");
+            std::wstring importedPath;
+            std::wstring importError;
+            if (!importPlugin(path, importedPath, importError)) {
+              setStatus(importError);
+              return 0;
             }
+            gDllPaths.push_back(importedPath);
+            populateDllList();
+            saveSettings();
+            setStatus(L"DLL imported into SkyLoader's managed plugin directory.");
           }
           return 0;
         }

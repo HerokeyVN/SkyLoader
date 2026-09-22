@@ -1,0 +1,20 @@
+# Build outputs
+dist/*.exe
+dist/*.dll
+dist/*.log
+dist/*-vulkan-layer.json
+
+# Local machine configuration
+SkyLoader.ini
+dist/SkyLoader.ini
+dist/SkyBootstrap.ini
+
+# IDE and editor files
+.vscode/
+.vs/
+*.user
+*.suo
+
+# Crash dumps and temporary files
+*.dmp
+*.tmp

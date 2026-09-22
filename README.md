@@ -4,7 +4,7 @@ SkyLoader is a Windows launcher and local DLL manager for **Sky: Children of the
 
 ## Features
 
-- Launch Sky through Steam using `steam://run/2325290`.
+- Launch Sky through Steam.
 - Match the configured, canonical `Sky.exe` path before injecting.
 - Persist the game path and plugin list in `SkyLoader.ini`.
 - Import DLLs into `%LOCALAPPDATA%\SkyLoader\plugins` so the registered copy is independent of the source file.
@@ -78,6 +78,16 @@ mingw32-make all
 
 The build currently emits warnings for Vulkan aggregate initialization and dynamic callback casts; these are non-fatal and do not prevent the binaries from being produced.
 
+### Installer
+
+The Inno Setup script is located at [`installer/SkyLoader.iss`](installer/SkyLoader.iss). After building the binaries, compile it with Inno Setup's `ISCC.exe`:
+
+```powershell
+iscc installer\SkyLoader.iss
+```
+
+The installer uses a per-user destination under `%LOCALAPPDATA%\Programs\SkyLoader`, includes both `SkyLoader.exe` and `SkyBootstrap.dll`, and leaves user configuration writable without administrator privileges.
+
 ## Configuration
 
 `SkyLoader.ini` is created beside `SkyLoader.exe`.
@@ -105,7 +115,7 @@ The old staged Vulkan keys are ignored for compatibility. `EnableOverlay=1` enab
 
 1. Start `SkyLoader.exe`.
 2. Verify the `Sky.exe` path with **Browse Sky...**, or keep the Steam default.
-3. Add one or more 64-bit DLLs with **Add DLL...**. SkyLoader copies each DLL into its managed plugin directory and uses that copy for injection.
+3. Add one or more 64-bit DLLs with **Add DLL...**. SkyLoader copies each DLL into its managed plugin directory and uses that copy for injection. Adding the same plugin again prompts for replacement and keeps one entry in the list.
 4. Press **Launch Sky**. SkyLoader opens Steam instead of executing `Sky.exe` directly.
 5. SkyLoader waits for the configured executable, injects Bootstrap, then sends plugin-load requests.
 

@@ -54,6 +54,24 @@ std::wstring fileNameOnly(const std::wstring& path) {
   return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
+std::wstring pluginIdentity(const std::wstring& path) {
+  std::wstring filename = fileNameOnly(path);
+  const size_t dot = filename.find_last_of(L'.');
+  if (dot == std::wstring::npos) return filename;
+  std::wstring stem = filename.substr(0, dot);
+  const size_t versionDot = stem.find_last_of(L'.');
+  if (versionDot != std::wstring::npos && versionDot + 1 < stem.size()) {
+    bool numericSuffix = true;
+    for (size_t i = versionDot + 1; i < stem.size(); ++i) {
+      if (stem[i] < L'0' || stem[i] > L'9') { numericSuffix = false; break; }
+    }
+    if (numericSuffix) stem.resize(versionDot);
+  }
+  return stem + filename.substr(dot);
+}
+
+bool samePath(const std::wstring& first, const std::wstring& second);
+
 std::wstring managedPluginDirectory() {
   wchar_t localAppData[MAX_PATH]{};
   if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, localAppData) != S_OK)
@@ -72,10 +90,8 @@ bool importPlugin(const std::wstring& source, std::wstring& destination, std::ws
     return false;
   }
   const std::wstring filename = fileNameOnly(source);
-  const size_t dot = filename.find_last_of(L'.');
-  const std::wstring stem = dot == std::wstring::npos ? filename : filename.substr(0, dot);
-  const std::wstring extension = dot == std::wstring::npos ? L".dll" : filename.substr(dot);
-  destination = directory + L"\\" + stem + L"." + std::to_wstring(GetTickCount64()) + extension;
+  destination = directory + L"\\" + filename;
+  if (samePath(source, destination)) return true;
   if (!CopyFileW(source.c_str(), destination.c_str(), FALSE)) {
     error = L"Could not copy the DLL into the managed plugin directory (" +
             std::to_wstring(GetLastError()) + L").";
@@ -83,6 +99,15 @@ bool importPlugin(const std::wstring& source, std::wstring& destination, std::ws
     return false;
   }
   return true;
+}
+
+bool isManagedPluginPath(const std::wstring& path) {
+  const std::wstring directory = managedPluginDirectory();
+  if (directory.empty() || path.size() <= directory.size()) return false;
+  if (CompareStringOrdinal(path.c_str(), static_cast<int>(directory.size()),
+                           directory.c_str(), static_cast<int>(directory.size()), TRUE) != CSTR_EQUAL)
+    return false;
+  return path[directory.size()] == L'\\' || path[directory.size()] == L'/';
 }
 
 bool samePath(const std::wstring& first, const std::wstring& second) {
@@ -316,16 +341,47 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case kIdAddDll: {
           std::wstring path;
           if (chooseFile(window, L"Dynamic-link libraries\0*.dll\0\0", path)) {
+            const std::wstring identity = pluginIdentity(path);
+            bool replacing = false;
+            for (const auto& registered : gDllPaths) {
+              if (CompareStringOrdinal(pluginIdentity(registered).c_str(), -1,
+                                       identity.c_str(), -1, TRUE) == CSTR_EQUAL) {
+                replacing = true;
+                break;
+              }
+            }
+            if (replacing && MessageBoxW(window,
+                L"A plugin with this name is already imported. Replace it?",
+                L"Update plugin", MB_YESNO | MB_ICONQUESTION) != IDYES)
+              return 0;
             std::wstring importedPath;
             std::wstring importError;
             if (!importPlugin(path, importedPath, importError)) {
               setStatus(importError);
               return 0;
             }
-            gDllPaths.push_back(importedPath);
+            std::vector<std::wstring> updatedPaths;
+            bool replacedEntry = false;
+            for (const auto& registered : gDllPaths) {
+              const bool samePlugin = CompareStringOrdinal(pluginIdentity(registered).c_str(), -1,
+                                                           identity.c_str(), -1, TRUE) == CSTR_EQUAL;
+              if (!samePlugin) {
+                updatedPaths.push_back(registered);
+                continue;
+              }
+              if (!replacedEntry) {
+                updatedPaths.push_back(importedPath);
+                replacedEntry = true;
+              } else if (isManagedPluginPath(registered) && !samePath(registered, importedPath)) {
+                DeleteFileW(registered.c_str());
+              }
+            }
+            if (!replacedEntry) updatedPaths.push_back(importedPath);
+            gDllPaths = std::move(updatedPaths);
             populateDllList();
             saveSettings();
-            setStatus(L"DLL imported into SkyLoader's managed plugin directory.");
+            setStatus(replacing ? L"Plugin updated in SkyLoader's managed directory."
+                                : L"DLL imported into SkyLoader's managed plugin directory.");
           }
           return 0;
         }

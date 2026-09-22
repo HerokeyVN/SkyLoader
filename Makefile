@@ -25,4 +25,5 @@ dist:
 clean:
 
 	-del /q dist\SkyLoader.exe
+	-del /q dist\SkyBootstrap-vulkan-layer.json
 	-$(MAKE) -C $(BOOTSTRAP_DIR) clean

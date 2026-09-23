@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shlobj.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -29,6 +30,20 @@ std::wstring moduleDirectory() {
   std::wstring value(path);
   const size_t slash = value.find_last_of(L"\\/");
   return slash == std::wstring::npos ? L"." : value.substr(0, slash);
+}
+
+std::wstring defaultLogDirectory() {
+  wchar_t localAppData[MAX_PATH]{};
+  if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, localAppData) == S_OK) {
+    const std::wstring root = std::wstring(localAppData) + L"\\SkyLoader";
+    const std::wstring logDir = root + L"\\logs";
+    CreateDirectoryW(root.c_str(), nullptr);
+    CreateDirectoryW(logDir.c_str(), nullptr);
+    if (GetFileAttributesW(logDir.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      return logDir;
+    }
+  }
+  return moduleDirectory();
 }
 
 void writeLog(const char* format, ...) {
@@ -104,38 +119,109 @@ int loadPlugin(const wchar_t* rawPath) {
     std::lock_guard<std::mutex> lock(gPluginsLock);
     gPlugins.push_back({module, path, shutdown});
   }
-  writeLog("Loaded D3D11-hosted plugin: %ls", path.c_str());
+  writeLog("Loaded plugin: %ls", path.c_str());
   return 1;
 }
 
-void handleCommand(const char* command) {
-  constexpr const char prefix[] = "LOAD ";
-  if (!command || strncmp(command, prefix, sizeof(prefix) - 1) != 0) {
-    writeLog("Ignored pipe command: %s", command ? command : "(null)");
-    return;
+int unloadPlugin(const wchar_t* rawPath) {
+  if (!rawPath || !*rawPath) return 0;
+  const std::wstring path = absolutePath(rawPath);
+  Plugin targetPlugin{};
+  bool found = false;
+
+  {
+    std::lock_guard<std::mutex> lock(gPluginsLock);
+    for (auto it = gPlugins.begin(); it != gPlugins.end(); ++it) {
+      if (samePath(it->path, path)) {
+        targetPlugin = *it;
+        gPlugins.erase(it);
+        found = true;
+        break;
+      }
+    }
   }
 
-  wchar_t path[MAX_PATH]{};
-  if (!MultiByteToWideChar(CP_UTF8, 0, command + sizeof(prefix) - 1, -1, path, MAX_PATH)) {
-    writeLog("Could not decode plugin path from pipe command.");
-    return;
+  if (!found) {
+    writeLog("Plugin not found to unload: %ls", path.c_str());
+    return 0;
   }
-  loadPlugin(path);
+
+  if (targetPlugin.shutdown) {
+    writeLog("Calling SkyPluginShutdown for %ls", path.c_str());
+    targetPlugin.shutdown();
+  }
+
+  if (targetPlugin.module) {
+    FreeLibrary(targetPlugin.module);
+  }
+
+  writeLog("Unloaded plugin: %ls", path.c_str());
+  return 1;
+}
+
+bool handleCommand(const char* command, std::string& response) {
+  constexpr const char loadPrefix[] = "LOAD ";
+  constexpr const char unloadPrefix[] = "UNLOAD ";
+
+  if (command && strncmp(command, loadPrefix, sizeof(loadPrefix) - 1) == 0) {
+    wchar_t path[MAX_PATH]{};
+    if (!MultiByteToWideChar(CP_UTF8, 0, command + sizeof(loadPrefix) - 1, -1, path, MAX_PATH)) {
+      writeLog("Could not decode plugin path from pipe command.");
+      response = "FAIL DECODE_ERROR\n";
+      return false;
+    }
+    int result = loadPlugin(path);
+    if (result) {
+      response = "OK\n";
+      return true;
+    } else {
+      response = "FAIL LOAD_FAILED\n";
+      return false;
+    }
+  }
+
+  if (command && strncmp(command, unloadPrefix, sizeof(unloadPrefix) - 1) == 0) {
+    wchar_t path[MAX_PATH]{};
+    if (!MultiByteToWideChar(CP_UTF8, 0, command + sizeof(unloadPrefix) - 1, -1, path, MAX_PATH)) {
+      writeLog("Could not decode plugin path from pipe command.");
+      response = "FAIL DECODE_ERROR\n";
+      return false;
+    }
+    int result = unloadPlugin(path);
+    if (result) {
+      response = "OK\n";
+      return true;
+    } else {
+      response = "FAIL UNLOAD_FAILED\n";
+      return false;
+    }
+  }
+
+  writeLog("Ignored pipe command: %s", command ? command : "(null)");
+  response = "FAIL UNKNOWN_COMMAND\n";
+  return false;
 }
 
 DWORD WINAPI pipeThread(void*) {
   constexpr char pipeName[] = "\\\\.\\pipe\\sky_bootstrap";
   char buffer[32768]{};
   for (;;) {
-    HANDLE pipe = CreateNamedPipeA(pipeName, PIPE_ACCESS_INBOUND,
+    HANDLE pipe = CreateNamedPipeA(pipeName, PIPE_ACCESS_DUPLEX,
                                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-                                   PIPE_UNLIMITED_INSTANCES, 0, sizeof(buffer), 0, nullptr);
-    if (pipe == INVALID_HANDLE_VALUE) continue;
+                                   PIPE_UNLIMITED_INSTANCES, sizeof(buffer), sizeof(buffer), 0, nullptr);
+    if (pipe == INVALID_HANDLE_VALUE) {
+      Sleep(100);
+      continue;
+    }
     if (ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) {
       DWORD read = 0;
       while (ReadFile(pipe, buffer, sizeof(buffer) - 1, &read, nullptr) && read) {
         buffer[read] = '\0';
-        handleCommand(buffer);
+        std::string response;
+        handleCommand(buffer, response);
+        DWORD written = 0;
+        WriteFile(pipe, response.c_str(), static_cast<DWORD>(response.size()), &written, nullptr);
+        FlushFileBuffers(pipe);
       }
     }
     DisconnectNamedPipe(pipe);
@@ -144,10 +230,10 @@ DWORD WINAPI pipeThread(void*) {
 }
 
 DWORD WINAPI bootstrapThread(void*) {
-  gDirectory = moduleDirectory();
+  gDirectory = defaultLogDirectory();
   gLogPath = gDirectory + L"\\SkyBootstrap.log";
   writeLog("Started in PID %lu", GetCurrentProcessId());
-  writeLog("D3D11 host-window mode active; Vulkan interception is not installed.");
+  writeLog("D3D11 host-window mode active; log located at %ls", gLogPath.c_str());
   CreateThread(nullptr, 0, pipeThread, nullptr, 0, nullptr);
   return 0;
 }
@@ -155,6 +241,10 @@ DWORD WINAPI bootstrapThread(void*) {
 
 extern "C" SKYBOOTSTRAP_API int SKYBOOTSTRAP_CALL SkyBootstrapLoadPluginW(const wchar_t* path) {
   return loadPlugin(path);
+}
+
+extern "C" SKYBOOTSTRAP_API int SKYBOOTSTRAP_CALL SkyBootstrapUnloadPluginW(const wchar_t* path) {
+  return unloadPlugin(path);
 }
 
 extern "C" SKYBOOTSTRAP_API uint32_t SKYBOOTSTRAP_CALL SkyBootstrapPluginCount(void) {

@@ -7,12 +7,16 @@
 #include <uxtheme.h>
 
 #include <algorithm>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "loader_controller.h"
 
 namespace {
+
+constexpr UINT WM_INJECTION_COMPLETE = WM_USER + 101;
 
 constexpr int kIdGamePath = 1001;
 constexpr int kIdBrowseGame = 1002;
@@ -424,16 +428,20 @@ void requestAutoInject() {
   gPendingSkyTicks = 0;
 }
 
-void autoInjectViaController(DWORD pid) {
+void autoInjectViaController(HWND hwnd, DWORD pid) {
   std::vector<std::wstring> activeDlls;
   for (const auto& item : gPlugins) {
     if (item.enabled) {
       activeDlls.push_back(item.path);
     }
   }
-  LoaderController controller(gBootstrapPath, activeDlls);
-  const LoaderResult result = controller.installBootstrapAndPlugins(pid);
-  setStatus(result.message + L" (PID " + std::to_wstring(pid) + L").");
+  const std::wstring bootstrap = gBootstrapPath;
+  std::thread([pid, bootstrap, activeDlls, hwnd]() {
+    LoaderController controller(bootstrap, activeDlls);
+    const LoaderResult result = controller.installBootstrapAndPlugins(pid);
+    std::wstring* msg = new std::wstring(result.message + L" (PID " + std::to_wstring(pid) + L").");
+    PostMessageW(hwnd, WM_INJECTION_COMPLETE, reinterpret_cast<WPARAM>(msg), result.ok ? 1 : 0);
+  }).detach();
 }
 
 LRESULT CALLBACK launchButtonSubclass(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -762,6 +770,14 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
       return reinterpret_cast<INT_PTR>(gBgBrush);
     }
 
+    case WM_INJECTION_COMPLETE: {
+      std::unique_ptr<std::wstring> msg(reinterpret_cast<std::wstring*>(wParam));
+      if (msg) {
+        setStatus(*msg);
+      }
+      return 0;
+    }
+
     case WM_NOTIFY: {
       LPNMHDR hdr = reinterpret_cast<LPNMHDR>(lParam);
       if (hdr->idFrom == kIdDllList) {
@@ -777,6 +793,21 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 ListView_SetItemText(gDllList, pnmv->iItem, 1,
                                      const_cast<wchar_t*>(checked ? L"Enabled" : L"Disabled"));
                 saveSettings();
+
+                wchar_t configuredPath[MAX_PATH]{};
+                GetWindowTextW(gGamePath, configuredPath, MAX_PATH);
+                const DWORD runningPid = findSkyProcess(configuredPath);
+                if (runningPid) {
+                  const std::wstring pluginPath = gPlugins[pnmv->iItem].path;
+                  const std::wstring bootstrap = gBootstrapPath;
+                  std::thread([runningPid, bootstrap, pluginPath, checked, window]() {
+                    LoaderController controller(bootstrap, {});
+                    LoaderResult res = checked ? controller.loadPlugin(runningPid, pluginPath)
+                                               : controller.unloadPlugin(runningPid, pluginPath);
+                    std::wstring* msg = new std::wstring(res.message);
+                    PostMessageW(window, WM_INJECTION_COMPLETE, reinterpret_cast<WPARAM>(msg), res.ok ? 1 : 0);
+                  }).detach();
+                }
               }
             }
           }
@@ -847,6 +878,8 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             gPendingSkyPid = runningPid;
             gPendingSkyTicks = 0;
             setStatus(L"Sky.exe is already running; loading Bootstrap now.");
+            gAutoInjectPending = false;
+            autoInjectViaController(window, runningPid);
             return 0;
           }
           const HINSTANCE result = ShellExecuteW(window, L"open", kSkySteamUri, nullptr, nullptr, SW_SHOWNORMAL);
@@ -914,10 +947,24 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
           if (selected < 0 || static_cast<size_t>(selected) >= gPlugins.size()) {
             setStatus(L"Select a plugin first.");
           } else {
+            const std::wstring removedPath = gPlugins[selected].path;
             gPlugins.erase(gPlugins.begin() + selected);
             populateDllList();
             saveSettings();
             setStatus(L"Plugin removed from the list; original file was not deleted.");
+
+            wchar_t configuredPath[MAX_PATH]{};
+            GetWindowTextW(gGamePath, configuredPath, MAX_PATH);
+            const DWORD runningPid = findSkyProcess(configuredPath);
+            if (runningPid) {
+              const std::wstring bootstrap = gBootstrapPath;
+              std::thread([runningPid, bootstrap, removedPath, window]() {
+                LoaderController controller(bootstrap, {});
+                LoaderResult res = controller.unloadPlugin(runningPid, removedPath);
+                std::wstring* msg = new std::wstring(res.message);
+                PostMessageW(window, WM_INJECTION_COMPLETE, reinterpret_cast<WPARAM>(msg), res.ok ? 1 : 0);
+              }).detach();
+            }
           }
           return 0;
         }
@@ -945,7 +992,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
           setStatus(L"Sky.exe detected; loading Bootstrap DLL...");
         }
         gAutoInjectPending = false;
-        autoInjectViaController(currentPid);
+        autoInjectViaController(window, currentPid);
       }
       return 0;
 

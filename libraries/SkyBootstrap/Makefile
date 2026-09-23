@@ -3,7 +3,7 @@ SRC := src/dllmain.cpp
 
 CXX := g++
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -DSKYBOOTSTRAP_BUILD -Iinclude
-LDFLAGS := -shared -static -static-libgcc -static-libstdc++ -Wl,--gc-sections
+LDFLAGS := -shared -static -static-libgcc -static-libstdc++ -Wl,--gc-sections -lshlwapi -lshell32
 
 .PHONY: all clean
 

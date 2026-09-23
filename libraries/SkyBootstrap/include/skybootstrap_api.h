@@ -30,6 +30,7 @@ typedef void (SKYBOOTSTRAP_CALL *SkyPluginShutdownFn)(void);
 extern "C" {
 #endif
 SKYBOOTSTRAP_API int SKYBOOTSTRAP_CALL SkyBootstrapLoadPluginW(const wchar_t *path);
+SKYBOOTSTRAP_API int SKYBOOTSTRAP_CALL SkyBootstrapUnloadPluginW(const wchar_t *path);
 SKYBOOTSTRAP_API uint32_t SKYBOOTSTRAP_CALL SkyBootstrapPluginCount(void);
 #ifdef __cplusplus
 }

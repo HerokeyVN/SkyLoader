@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstring>
+#include <string>
 
 LoaderController::LoaderController(std::wstring bootstrapPath, std::vector<std::wstring> plugins)
     : bootstrapPath_(std::move(bootstrapPath)), plugins_(std::move(plugins)) {}
@@ -33,22 +34,65 @@ bool LoaderController::injectDll(unsigned long processId, const std::wstring& pa
   return true;
 }
 
-bool LoaderController::sendLoadCommand(const std::wstring& path) const {
-  char command[MAX_PATH * 3]{};
-  memcpy(command, "LOAD ", 5);
-  if (!WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, command + 5, static_cast<int>(sizeof(command) - 5), nullptr, nullptr)) return false;
+bool LoaderController::sendPipeCommand(const std::string& command, std::string& response) const {
   for (int attempt = 0; attempt < 100; ++attempt) {
     if (WaitNamedPipeA("\\\\.\\pipe\\sky_bootstrap", 50)) {
-      HANDLE pipe = CreateFileA("\\\\.\\pipe\\sky_bootstrap", GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+      HANDLE pipe = CreateFileA("\\\\.\\pipe\\sky_bootstrap",
+                                GENERIC_READ | GENERIC_WRITE,
+                                0, nullptr, OPEN_EXISTING, 0, nullptr);
       if (pipe != INVALID_HANDLE_VALUE) {
-        DWORD written = 0; const DWORD bytes = static_cast<DWORD>(strlen(command));
-        const bool ok = WriteFile(pipe, command, bytes, &written, nullptr) && written == bytes;
-        CloseHandle(pipe); return ok;
+        DWORD mode = PIPE_READMODE_MESSAGE;
+        SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+
+        DWORD written = 0;
+        const DWORD bytes = static_cast<DWORD>(command.size());
+        const bool okWrite = WriteFile(pipe, command.c_str(), bytes, &written, nullptr) && written == bytes;
+        if (!okWrite) {
+          CloseHandle(pipe);
+          Sleep(25);
+          continue;
+        }
+
+        char buffer[1024]{};
+        DWORD readBytes = 0;
+        if (ReadFile(pipe, buffer, sizeof(buffer) - 1, &readBytes, nullptr) && readBytes > 0) {
+          buffer[readBytes] = '\0';
+          response = buffer;
+          CloseHandle(pipe);
+          return true;
+        }
+        CloseHandle(pipe);
       }
     }
     Sleep(25);
   }
   return false;
+}
+
+bool LoaderController::sendLoadCommand(const std::wstring& path) const {
+  std::string utf8Path;
+  int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  if (sizeNeeded > 0) {
+    utf8Path.resize(sizeNeeded - 1);
+    WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, &utf8Path[0], sizeNeeded, nullptr, nullptr);
+  }
+  std::string cmd = "LOAD " + utf8Path;
+  std::string response;
+  if (!sendPipeCommand(cmd, response)) return false;
+  return response.find("OK") == 0;
+}
+
+bool LoaderController::sendUnloadCommand(const std::wstring& path) const {
+  std::string utf8Path;
+  int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  if (sizeNeeded > 0) {
+    utf8Path.resize(sizeNeeded - 1);
+    WideCharToMultiByte(CP_UTF8, 0, path.c_str(), -1, &utf8Path[0], sizeNeeded, nullptr, nullptr);
+  }
+  std::string cmd = "UNLOAD " + utf8Path;
+  std::string response;
+  if (!sendPipeCommand(cmd, response)) return false;
+  return response.find("OK") == 0;
 }
 
 LoaderResult LoaderController::installBootstrapAndPlugins(unsigned long processId) const {
@@ -75,6 +119,12 @@ LoaderResult LoaderController::installBootstrap(unsigned long processId) const {
 LoaderResult LoaderController::loadPlugin(unsigned long processId, const std::wstring& pluginPath) const {
   LoaderResult bootstrap = installBootstrap(processId);
   if (!bootstrap.ok) return bootstrap;
-  if (!sendLoadCommand(pluginPath)) return {0, L"SkyBootstrap pipe is not ready.", false};
+  if (!sendLoadCommand(pluginPath)) return {0, L"SkyBootstrap pipe failed to load plugin.", false};
   return {1, L"SkyBootstrap loaded the selected plugin.", true};
+}
+
+LoaderResult LoaderController::unloadPlugin(unsigned long processId, const std::wstring& pluginPath) const {
+  (void)processId;
+  if (!sendUnloadCommand(pluginPath)) return {0, L"SkyBootstrap pipe failed to unload plugin.", false};
+  return {1, L"SkyBootstrap unloaded the selected plugin.", true};
 }

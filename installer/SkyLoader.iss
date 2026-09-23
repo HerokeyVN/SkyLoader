@@ -1,5 +1,5 @@
 #define MyAppName "Sky Loader"
-#define MyAppVersion "0.0.1"
+#define MyAppVersion "0.0.2"
 #define MyAppPublisher "HerokeyVN"
 #define MyAppExeName "SkyLoader.exe"
 
@@ -19,6 +19,7 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
+SetupIconFile=..\resources\skyloader.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]

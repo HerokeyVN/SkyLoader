@@ -189,12 +189,158 @@ void saveSettings() {
   }
 }
 
+bool fileExists(const std::wstring& path) {
+  if (path.empty()) return false;
+  DWORD attr = GetFileAttributesW(path.c_str());
+  return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+std::wstring getSteamPathFromRegistry() {
+  wchar_t buffer[MAX_PATH]{};
+  DWORD size = sizeof(buffer);
+  if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath",
+                   RRF_RT_REG_SZ, nullptr, buffer, &size) == ERROR_SUCCESS && buffer[0]) {
+    std::wstring path(buffer);
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    return path;
+  }
+  size = sizeof(buffer);
+  if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Valve\\Steam", L"InstallPath",
+                   RRF_RT_REG_SZ, nullptr, buffer, &size) == ERROR_SUCCESS && buffer[0]) {
+    std::wstring path(buffer);
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    return path;
+  }
+  size = sizeof(buffer);
+  if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Valve\\Steam", L"InstallPath",
+                   RRF_RT_REG_SZ, nullptr, buffer, &size) == ERROR_SUCCESS && buffer[0]) {
+    std::wstring path(buffer);
+    std::replace(path.begin(), path.end(), L'/', L'\\');
+    return path;
+  }
+  return L"";
+}
+
+std::vector<std::wstring> getSteamLibraryFolders(const std::wstring& steamPath) {
+  std::vector<std::wstring> folders;
+  if (steamPath.empty()) return folders;
+  folders.push_back(steamPath);
+
+  const std::wstring vdfPath = steamPath + L"\\steamapps\\libraryfolders.vdf";
+  HANDLE file = CreateFileW(vdfPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+  if (file != INVALID_HANDLE_VALUE) {
+    DWORD fileSize = GetFileSize(file, nullptr);
+    if (fileSize != INVALID_FILE_SIZE && fileSize > 0 && fileSize < 5 * 1024 * 1024) {
+      std::string content(fileSize, '\0');
+      DWORD readBytes = 0;
+      if (ReadFile(file, &content[0], fileSize, &readBytes, nullptr) && readBytes > 0) {
+        size_t pos = 0;
+        while ((pos = content.find("\"path\"", pos)) != std::string::npos) {
+          pos += 6;
+          size_t startQuote = content.find('\"', pos);
+          if (startQuote == std::string::npos) break;
+          size_t endQuote = content.find('\"', startQuote + 1);
+          if (endQuote == std::string::npos) break;
+
+          std::string rawPath = content.substr(startQuote + 1, endQuote - startQuote - 1);
+          std::string unescaped;
+          for (size_t i = 0; i < rawPath.size(); ++i) {
+            if (rawPath[i] == '\\' && i + 1 < rawPath.size() && rawPath[i + 1] == '\\') {
+              unescaped += '\\';
+              ++i;
+            } else {
+              unescaped += rawPath[i];
+            }
+          }
+          if (!unescaped.empty()) {
+            wchar_t wbuf[MAX_PATH]{};
+            if (MultiByteToWideChar(CP_UTF8, 0, unescaped.c_str(), -1, wbuf, MAX_PATH)) {
+              std::wstring folder(wbuf);
+              std::replace(folder.begin(), folder.end(), L'/', L'\\');
+              if (std::find_if(folders.begin(), folders.end(), [&](const std::wstring& f) {
+                    return samePath(f, folder);
+                  }) == folders.end()) {
+                folders.push_back(folder);
+              }
+            }
+          }
+          pos = endQuote + 1;
+        }
+      }
+    }
+    CloseHandle(file);
+  }
+  return folders;
+}
+
+std::wstring autoDetectSkyGamePath() {
+  const std::wstring relSubpath = L"\\steamapps\\common\\Sky Children of the Light\\Sky.exe";
+
+  // 1. Check Steam installation and all configured Steam libraries
+  const std::wstring steamPath = getSteamPathFromRegistry();
+  if (!steamPath.empty()) {
+    std::vector<std::wstring> libraries = getSteamLibraryFolders(steamPath);
+    for (const auto& lib : libraries) {
+      std::wstring candidate = lib + relSubpath;
+      if (fileExists(candidate)) {
+        return normalizedPath(candidate);
+      }
+    }
+  }
+
+  // 2. Scan all logical drives for standard Steam library locations
+  wchar_t drives[512]{};
+  if (GetLogicalDriveStringsW(512, drives)) {
+    const wchar_t* d = drives;
+    while (*d) {
+      std::wstring driveRoot(d);
+      if (!driveRoot.empty() && driveRoot.back() == L'\\') {
+        driveRoot.pop_back();
+      }
+      const std::wstring commonPrefixes[] = {
+        L"",
+        L"\\SteamLibrary",
+        L"\\Steam",
+        L"\\Program Files (x86)\\Steam",
+        L"\\Program Files\\Steam",
+        L"\\Games\\SteamLibrary",
+        L"\\Games\\Steam",
+        L"\\Games"
+      };
+      for (const auto& prefix : commonPrefixes) {
+        std::wstring candidate = driveRoot + prefix + relSubpath;
+        if (fileExists(candidate)) {
+          return normalizedPath(candidate);
+        }
+      }
+      d += wcslen(d) + 1;
+    }
+  }
+
+  return L"";
+}
+
 void loadSettings() {
-  const wchar_t* fallback =
+  const wchar_t* defaultFallback =
     L"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Sky Children of the Light\\Sky.exe";
-  wchar_t gamePath[MAX_PATH]{};
-  GetPrivateProfileStringW(L"SkyLoader", L"GamePath", fallback, gamePath, MAX_PATH, gIniPath.c_str());
-  SetWindowTextW(gGamePath, gamePath);
+  wchar_t savedGamePath[MAX_PATH]{};
+  GetPrivateProfileStringW(L"SkyLoader", L"GamePath", L"", savedGamePath, MAX_PATH, gIniPath.c_str());
+
+  std::wstring gamePath = savedGamePath;
+  if (gamePath.empty() || !fileExists(gamePath)) {
+    const std::wstring detected = autoDetectSkyGamePath();
+    if (!detected.empty()) {
+      gamePath = detected;
+      WritePrivateProfileStringW(L"SkyLoader", L"GamePath", gamePath.c_str(), gIniPath.c_str());
+      setStatus(L"Auto-detected Sky.exe in Steam library.");
+    } else {
+      gamePath = defaultFallback;
+      if (!fileExists(gamePath)) {
+        setStatus(L"Sky.exe not found at default path. Click Browse to locate Sky.exe.");
+      }
+    }
+  }
+  SetWindowTextW(gGamePath, gamePath.c_str());
 
   const std::wstring defaultBootstrap = moduleDirectory() + L"\\SkyBootstrap.dll";
   wchar_t bootstrapPath[MAX_PATH]{};
@@ -236,7 +382,7 @@ bool chooseFile(HWND owner, const wchar_t* filter, std::wstring& output) {
   return true;
 }
 
-DWORD findSkyProcess(const std::wstring& expectedPath) {
+DWORD findSkyProcess(const std::wstring& expectedPath, std::wstring* actualDetectedPath = nullptr) {
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snapshot == INVALID_HANDLE_VALUE)
     return 0;
@@ -254,9 +400,17 @@ DWORD findSkyProcess(const std::wstring& expectedPath) {
       DWORD imageLength = MAX_PATH;
       const bool queried = QueryFullProcessImageNameW(candidate, 0, imagePath, &imageLength) != FALSE;
       CloseHandle(candidate);
-      if (queried && samePath(normalizedPath(imagePath), normalizedPath(expectedPath))) {
-        pid = process.th32ProcessID;
-        break;
+      if (queried) {
+        std::wstring normalizedImage = normalizedPath(imagePath);
+        if (expectedPath.empty() || samePath(normalizedImage, normalizedPath(expectedPath))) {
+          pid = process.th32ProcessID;
+          if (actualDetectedPath) *actualDetectedPath = normalizedImage;
+          break;
+        }
+        if (pid == 0) {
+          pid = process.th32ProcessID;
+          if (actualDetectedPath) *actualDetectedPath = normalizedImage;
+        }
       }
     } while (Process32NextW(snapshot, &process));
   }
@@ -683,9 +837,13 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case kIdLaunchGame: {
           wchar_t configuredPath[MAX_PATH]{};
           GetWindowTextW(gGamePath, configuredPath, MAX_PATH);
-          const DWORD runningPid = findSkyProcess(configuredPath);
+          std::wstring actualPath;
+          const DWORD runningPid = findSkyProcess(configuredPath, &actualPath);
           requestAutoInject();
           if (runningPid) {
+            if (!actualPath.empty() && !samePath(configuredPath, actualPath)) {
+              SetWindowTextW(gGamePath, actualPath.c_str());
+            }
             gPendingSkyPid = runningPid;
             gPendingSkyTicks = 0;
             setStatus(L"Sky.exe is already running; loading Bootstrap now.");
@@ -771,10 +929,15 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
       if (wParam == kAutoInjectTimer && gAutoInjectPending) {
         wchar_t configuredPath[MAX_PATH]{};
         GetWindowTextW(gGamePath, configuredPath, MAX_PATH);
-        const DWORD currentPid = findSkyProcess(configuredPath);
+        std::wstring actualPath;
+        const DWORD currentPid = findSkyProcess(configuredPath, &actualPath);
         if (!currentPid) {
           setStatus(L"Waiting for Steam to start Sky.exe...");
           return 0;
+        }
+        if (!actualPath.empty() && !samePath(configuredPath, actualPath)) {
+          SetWindowTextW(gGamePath, actualPath.c_str());
+          saveSettings();
         }
         if (currentPid != gPendingSkyPid) {
           gPendingSkyPid = currentPid;

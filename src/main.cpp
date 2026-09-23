@@ -4,6 +4,7 @@
 #include <tlhelp32.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <string>
@@ -12,25 +13,55 @@
 #include "loader_controller.h"
 
 namespace {
+
 constexpr int kIdGamePath = 1001;
 constexpr int kIdBrowseGame = 1002;
 constexpr int kIdLaunchGame = 1003;
 constexpr int kIdDllList = 1004;
 constexpr int kIdAddDll = 1005;
-constexpr int kIdRemoveDll = 1006;
-constexpr int kIdInject = 1007;
-constexpr int kIdRefresh = 1008;
-constexpr int kIdStatus = 1009;
+constexpr int kIdOpenFolder = 1006;
+constexpr int kIdRemoveDll = 1007;
+constexpr int kIdStatus = 1008;
+
 constexpr wchar_t kSkySteamUri[] = L"steam://run/2325290";
 constexpr UINT_PTR kAutoInjectTimer = 1;
 constexpr UINT kAutoInjectPollMs = 50;
 
-HWND gGamePath = nullptr;
+struct PluginItem {
+  std::wstring path;
+  bool enabled{true};
+};
+
+HWND gMainWindow = nullptr;
+HWND gPluginsTitle = nullptr;
+HWND gAddDllBtn = nullptr;
+HWND gOpenFolderBtn = nullptr;
+HWND gRemoveDllBtn = nullptr;
 HWND gDllList = nullptr;
+HWND gHintText = nullptr;
+HWND gGamePathLabel = nullptr;
+HWND gGamePath = nullptr;
+HWND gBrowseBtn = nullptr;
+HWND gLaunchBtn = nullptr;
 HWND gStatus = nullptr;
+
+HFONT gFontRegular = nullptr;
+HFONT gFontSemibold = nullptr;
+HFONT gFontBold = nullptr;
+HFONT gFontLaunchBtn = nullptr;
+
+HBRUSH gBgBrush = nullptr;
+HBRUSH gFooterBrush = nullptr;
+
+WNDPROC gOrigLaunchBtnProc = nullptr;
+bool gLaunchHover = false;
+WNDPROC gOrigAddDllBtnProc = nullptr;
+bool gAddDllHover = false;
+bool gIgnoreItemChanged = false;
+
 std::wstring gIniPath;
 std::wstring gBootstrapPath;
-std::vector<std::wstring> gDllPaths;
+std::vector<PluginItem> gPlugins;
 bool gAutoInjectPending = false;
 DWORD gPendingSkyPid = 0;
 UINT gPendingSkyTicks = 0;
@@ -70,7 +101,9 @@ std::wstring pluginIdentity(const std::wstring& path) {
   return stem + filename.substr(dot);
 }
 
-bool samePath(const std::wstring& first, const std::wstring& second);
+bool samePath(const std::wstring& first, const std::wstring& second) {
+  return CompareStringOrdinal(first.c_str(), -1, second.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
 
 std::wstring managedPluginDirectory() {
   wchar_t localAppData[MAX_PATH]{};
@@ -110,31 +143,29 @@ bool isManagedPluginPath(const std::wstring& path) {
   return path[directory.size()] == L'\\' || path[directory.size()] == L'/';
 }
 
-bool samePath(const std::wstring& first, const std::wstring& second) {
-  return CompareStringOrdinal(first.c_str(), -1, second.c_str(), -1, TRUE) == CSTR_EQUAL;
-}
-
 void setStatus(const std::wstring& text) {
-  SetWindowTextW(gStatus, text.c_str());
-}
-
-std::wstring selectedPath() {
-  const int selected = ListView_GetNextItem(gDllList, -1, LVNI_SELECTED);
-  if (selected < 0 || static_cast<size_t>(selected) >= gDllPaths.size())
-    return L"";
-  return gDllPaths[static_cast<size_t>(selected)];
+  if (gStatus) {
+    SetWindowTextW(gStatus, text.c_str());
+  }
 }
 
 void populateDllList() {
+  gIgnoreItemChanged = true;
   ListView_DeleteAllItems(gDllList);
-  for (size_t i = 0; i < gDllPaths.size(); ++i) {
+  for (size_t i = 0; i < gPlugins.size(); ++i) {
     LVITEMW item{};
     item.mask = LVIF_TEXT;
     item.iItem = static_cast<int>(i);
-    const std::wstring displayName = fileNameOnly(gDllPaths[i]);
+    const std::wstring displayName = fileNameOnly(gPlugins[i].path);
     item.pszText = const_cast<wchar_t*>(displayName.c_str());
     ListView_InsertItem(gDllList, &item);
+
+    const wchar_t* statusText = gPlugins[i].enabled ? L"Enabled" : L"Disabled";
+    ListView_SetItemText(gDllList, static_cast<int>(i), 1, const_cast<wchar_t*>(statusText));
+
+    ListView_SetCheckState(gDllList, static_cast<int>(i), gPlugins[i].enabled ? TRUE : FALSE);
   }
+  gIgnoreItemChanged = false;
 }
 
 void saveSettings() {
@@ -142,16 +173,19 @@ void saveSettings() {
   GetWindowTextW(gGamePath, gamePath, MAX_PATH);
   WritePrivateProfileStringW(L"SkyLoader", L"GamePath", gamePath, gIniPath.c_str());
   WritePrivateProfileStringW(L"SkyLoader", L"BootstrapPath", gBootstrapPath.c_str(), gIniPath.c_str());
-  WritePrivateProfileStringW(L"Dlls", L"Count", std::to_wstring(gDllPaths.size()).c_str(), gIniPath.c_str());
+  WritePrivateProfileStringW(L"Dlls", L"Count", std::to_wstring(gPlugins.size()).c_str(), gIniPath.c_str());
 
-  for (size_t i = 0; i < gDllPaths.size(); ++i) {
+  for (size_t i = 0; i < gPlugins.size(); ++i) {
     const std::wstring key = L"Dll" + std::to_wstring(i);
-    WritePrivateProfileStringW(L"Dlls", key.c_str(), gDllPaths[i].c_str(), gIniPath.c_str());
+    const std::wstring enabledKey = L"DllEnabled" + std::to_wstring(i);
+    WritePrivateProfileStringW(L"Dlls", key.c_str(), gPlugins[i].path.c_str(), gIniPath.c_str());
+    WritePrivateProfileStringW(L"Dlls", enabledKey.c_str(), gPlugins[i].enabled ? L"1" : L"0", gIniPath.c_str());
   }
-  // Clear stale numbered values left by a previous, longer list.
-  for (size_t i = gDllPaths.size(); i < 256; ++i) {
+  for (size_t i = gPlugins.size(); i < 256; ++i) {
     const std::wstring key = L"Dll" + std::to_wstring(i);
+    const std::wstring enabledKey = L"DllEnabled" + std::to_wstring(i);
     WritePrivateProfileStringW(L"Dlls", key.c_str(), nullptr, gIniPath.c_str());
+    WritePrivateProfileStringW(L"Dlls", enabledKey.c_str(), nullptr, gIniPath.c_str());
   }
 }
 
@@ -167,21 +201,22 @@ void loadSettings() {
   GetPrivateProfileStringW(L"SkyLoader", L"BootstrapPath", defaultBootstrap.c_str(),
                            bootstrapPath, MAX_PATH, gIniPath.c_str());
   gBootstrapPath = bootstrapPath;
-  // Migrate the development path used before SkyBootstrap became part of
-  // SkyLoader. Custom paths remain untouched.
   const std::wstring legacyBootstrap =
     L"D:\\Develop\\Language\\C++\\SkyBootstrap\\dist\\SkyBootstrap.dll";
   if (samePath(gBootstrapPath, legacyBootstrap))
     gBootstrapPath = defaultBootstrap;
 
   const UINT count = GetPrivateProfileIntW(L"Dlls", L"Count", 0, gIniPath.c_str());
-  gDllPaths.clear();
+  gPlugins.clear();
   for (UINT i = 0; i < count && i < 256; ++i) {
     const std::wstring key = L"Dll" + std::to_wstring(i);
+    const std::wstring enabledKey = L"DllEnabled" + std::to_wstring(i);
     wchar_t value[MAX_PATH]{};
     GetPrivateProfileStringW(L"Dlls", key.c_str(), L"", value, MAX_PATH, gIniPath.c_str());
-    if (value[0] && GetFileAttributesW(value) != INVALID_FILE_ATTRIBUTES)
-      gDllPaths.emplace_back(value);
+    if (value[0] && GetFileAttributesW(value) != INVALID_FILE_ATTRIBUTES) {
+      const UINT enabled = GetPrivateProfileIntW(L"Dlls", enabledKey.c_str(), 1, gIniPath.c_str());
+      gPlugins.push_back({value, enabled != 0});
+    }
   }
   populateDllList();
 }
@@ -229,85 +264,412 @@ DWORD findSkyProcess(const std::wstring& expectedPath) {
   return pid;
 }
 
-
 void requestAutoInject() {
   gAutoInjectPending = true;
   gPendingSkyPid = 0;
   gPendingSkyTicks = 0;
 }
 
-
 void autoInjectViaController(DWORD pid) {
-  LoaderController controller(gBootstrapPath, gDllPaths);
+  std::vector<std::wstring> activeDlls;
+  for (const auto& item : gPlugins) {
+    if (item.enabled) {
+      activeDlls.push_back(item.path);
+    }
+  }
+  LoaderController controller(gBootstrapPath, activeDlls);
   const LoaderResult result = controller.installBootstrapAndPlugins(pid);
   setStatus(result.message + L" (PID " + std::to_wstring(pid) + L").");
 }
 
-void loadSelectedPluginViaController(const std::wstring& path, DWORD pid) {
-  LoaderController controller(gBootstrapPath, {});
-  setStatus(controller.loadPlugin(pid, path).message);
+LRESULT CALLBACK launchButtonSubclass(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+    case WM_MOUSEMOVE: {
+      if (!gLaunchHover) {
+        gLaunchHover = true;
+        TRACKMOUSEEVENT tme{};
+        tme.cbSize = sizeof(TRACKMOUSEEVENT);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
+        InvalidateRect(hwnd, nullptr, TRUE);
+      }
+      break;
+    }
+    case WM_MOUSELEAVE: {
+      gLaunchHover = false;
+      InvalidateRect(hwnd, nullptr, TRUE);
+      break;
+    }
+  }
+  return CallWindowProcW(gOrigLaunchBtnProc, hwnd, msg, wParam, lParam);
 }
 
+LRESULT CALLBACK addDllButtonSubclass(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+    case WM_MOUSEMOVE: {
+      if (!gAddDllHover) {
+        gAddDllHover = true;
+        TRACKMOUSEEVENT tme{};
+        tme.cbSize = sizeof(TRACKMOUSEEVENT);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
+        InvalidateRect(hwnd, nullptr, TRUE);
+      }
+      break;
+    }
+    case WM_MOUSELEAVE: {
+      gAddDllHover = false;
+      InvalidateRect(hwnd, nullptr, TRUE);
+      break;
+    }
+  }
+  return CallWindowProcW(gOrigAddDllBtnProc, hwnd, msg, wParam, lParam);
+}
 
 void layout(HWND window) {
   RECT client{};
   GetClientRect(window, &client);
   const int width = client.right;
   const int height = client.bottom;
-  const int margin = 12;
-  const int buttonWidth = 130;
 
-  MoveWindow(gGamePath, margin, 34, width - margin * 3 - buttonWidth * 2, 26, TRUE);
-  MoveWindow(GetDlgItem(window, kIdBrowseGame), width - margin * 2 - buttonWidth * 2, 34, buttonWidth, 26, TRUE);
-  MoveWindow(GetDlgItem(window, kIdLaunchGame), width - margin - buttonWidth, 34, buttonWidth, 26, TRUE);
-  MoveWindow(gDllList, margin, 96, width - margin * 2, height - 182, TRUE);
-  MoveWindow(GetDlgItem(window, kIdAddDll), margin, height - 74, buttonWidth, 28, TRUE);
-  MoveWindow(GetDlgItem(window, kIdRemoveDll), margin + buttonWidth + 8, height - 74, buttonWidth, 28, TRUE);
-  MoveWindow(GetDlgItem(window, kIdRefresh), margin + (buttonWidth + 8) * 2, height - 74, buttonWidth, 28, TRUE);
-  MoveWindow(GetDlgItem(window, kIdInject), width - margin - 170, height - 74, 170, 28, TRUE);
-  MoveWindow(gStatus, margin, height - 37, width - margin * 2, 22, TRUE);
-  ListView_SetColumnWidth(gDllList, 0, width - margin * 2 - 6);
+  const int margin = 16;
+  const int footerHeight = 100;
+
+  // Header row
+  const int btnHeight = 28;
+  const int addBtnW = 100;
+  const int openFolderBtnW = 100;
+  const int removeBtnW = 85;
+
+  MoveWindow(gPluginsTitle, margin, 18, 150, 20, TRUE);
+  MoveWindow(gRemoveDllBtn, width - margin - removeBtnW, 14, removeBtnW, btnHeight, TRUE);
+  MoveWindow(gOpenFolderBtn, width - margin - removeBtnW - 8 - openFolderBtnW, 14, openFolderBtnW, btnHeight, TRUE);
+  MoveWindow(gAddDllBtn, width - margin - removeBtnW - 8 - openFolderBtnW - 8 - addBtnW, 14, addBtnW, btnHeight, TRUE);
+
+  // Plugins list
+  const int listTop = 50;
+  const int listHeight = height - listTop - footerHeight - 26;
+  MoveWindow(gDllList, margin, listTop, width - margin * 2, listHeight, TRUE);
+
+  // Resize columns
+  const int listWidth = width - margin * 2;
+  const int statusColW = 100;
+  const int nameColW = (std::max)(100, listWidth - statusColW - 25);
+  ListView_SetColumnWidth(gDllList, 0, nameColW);
+  ListView_SetColumnWidth(gDllList, 1, statusColW);
+
+  // Hint text
+  MoveWindow(gHintText, margin, listTop + listHeight + 6, width - margin * 2, 18, TRUE);
+
+  // Footer section
+  const int footerTop = height - footerHeight;
+  const int launchBtnW = 160;
+  const int launchBtnH = 46;
+
+  // Bottom-Right: Launch Button
+  MoveWindow(gLaunchBtn, width - margin - launchBtnW, footerTop + 30, launchBtnW, launchBtnH, TRUE);
+
+  // Bottom-Left: Game path & status
+  const int leftSectionW = (width - margin - launchBtnW - 16) - margin;
+  MoveWindow(gGamePathLabel, margin, footerTop + 10, leftSectionW, 16, TRUE);
+
+  const int browseBtnW = 85;
+  const int editW = leftSectionW - browseBtnW - 8;
+  MoveWindow(gGamePath, margin, footerTop + 28, editW, 26, TRUE);
+  MoveWindow(gBrowseBtn, margin + editW + 8, footerTop + 28, browseBtnW, 26, TRUE);
+
+  MoveWindow(gStatus, margin, footerTop + 64, leftSectionW, 22, TRUE);
 }
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
   switch (message) {
     case WM_CREATE: {
+      gMainWindow = window;
       INITCOMMONCONTROLSEX controls{};
       controls.dwSize = sizeof(controls);
       controls.dwICC = ICC_LISTVIEW_CLASSES;
       InitCommonControlsEx(&controls);
-      CreateWindowW(L"STATIC", L"Sky executable", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, nullptr, nullptr);
-      gGamePath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+
+      DragAcceptFiles(window, TRUE);
+
+      // Create Fonts (Segoe UI)
+      gFontRegular = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+      gFontSemibold = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+      gFontBold = CreateFontW(-13, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+      gFontLaunchBtn = CreateFontW(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+      gBgBrush = CreateSolidBrush(RGB(248, 250, 252));      // Slate-50
+      gFooterBrush = CreateSolidBrush(RGB(255, 255, 255)); // Crisp White
+
+      // Header controls
+      gPluginsTitle = CreateWindowW(L"STATIC", L"PLUGINS", WS_CHILD | WS_VISIBLE,
+                                    0, 0, 0, 0, window, nullptr, nullptr, nullptr);
+      SendMessageW(gPluginsTitle, WM_SETFONT, reinterpret_cast<WPARAM>(gFontBold), TRUE);
+
+      gAddDllBtn = CreateWindowW(L"BUTTON", L"Add DLL...",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdAddDll), nullptr, nullptr);
+      gOrigAddDllBtnProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+          gAddDllBtn, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(addDllButtonSubclass)));
+
+      gOpenFolderBtn = CreateWindowW(L"BUTTON", L"Open Folder", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                     0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdOpenFolder), nullptr, nullptr);
+      SendMessageW(gOpenFolderBtn, WM_SETFONT, reinterpret_cast<WPARAM>(gFontRegular), TRUE);
+
+      gRemoveDllBtn = CreateWindowW(L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                    0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdRemoveDll), nullptr, nullptr);
+      SendMessageW(gRemoveDllBtn, WM_SETFONT, reinterpret_cast<WPARAM>(gFontRegular), TRUE);
+
+      // Plugins ListView
+      gDllList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
+                                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdDllList), nullptr, nullptr);
+      ListView_SetExtendedListViewStyle(gDllList,
+                                        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_CHECKBOXES | LVS_EX_GRIDLINES);
+      SendMessageW(gDllList, WM_SETFONT, reinterpret_cast<WPARAM>(gFontRegular), TRUE);
+
+      LVCOLUMNW col0{};
+      col0.mask = LVCF_TEXT | LVCF_WIDTH;
+      col0.pszText = const_cast<wchar_t*>(L"Plugin");
+      col0.cx = 260;
+      ListView_InsertColumn(gDllList, 0, &col0);
+
+      LVCOLUMNW col1{};
+      col1.mask = LVCF_TEXT | LVCF_WIDTH;
+      col1.pszText = const_cast<wchar_t*>(L"Status");
+      col1.cx = 100;
+      ListView_InsertColumn(gDllList, 1, &col1);
+
+      // Drag and drop hint
+      gHintText = CreateWindowW(L"STATIC", L"Tip: You can drag and drop .dll files directly into this window.",
+                                WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, nullptr, nullptr);
+      SendMessageW(gHintText, WM_SETFONT, reinterpret_cast<WPARAM>(gFontRegular), TRUE);
+
+      // Footer controls
+      gGamePathLabel = CreateWindowW(L"STATIC", L"Sky Executable:", WS_CHILD | WS_VISIBLE,
+                                     0, 0, 0, 0, window, nullptr, nullptr, nullptr);
+      SendMessageW(gGamePathLabel, WM_SETFONT, reinterpret_cast<WPARAM>(gFontSemibold), TRUE);
+
+      gGamePath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                                   0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdGamePath), nullptr, nullptr);
-      CreateWindowW(L"BUTTON", L"Browse Sky...", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                    0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdBrowseGame), nullptr, nullptr);
-      CreateWindowW(L"BUTTON", L"Launch Sky", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                    0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdLaunchGame), nullptr, nullptr);
-      CreateWindowW(L"STATIC", L"Registered DLL files", WS_CHILD | WS_VISIBLE, 12, 72, 200, 20, window, nullptr, nullptr, nullptr);
-      gDllList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
-                                  0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdDllList), nullptr, nullptr);
-      ListView_SetExtendedListViewStyle(gDllList, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-      LVCOLUMNW column{};
-      column.mask = LVCF_TEXT | LVCF_WIDTH;
-       column.pszText = const_cast<wchar_t*>(L"Plugin");
-      column.cx = 600;
-      ListView_InsertColumn(gDllList, 0, &column);
-      CreateWindowW(L"BUTTON", L"Add DLL...", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdAddDll), nullptr, nullptr);
-      CreateWindowW(L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdRemoveDll), nullptr, nullptr);
-      CreateWindowW(L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdRefresh), nullptr, nullptr);
-      CreateWindowW(L"BUTTON", L"Inject selected", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdInject), nullptr, nullptr);
-      gStatus = CreateWindowW(L"STATIC", L"Ready. Start Sky, select a DLL, then inject.", WS_CHILD | WS_VISIBLE,
-                              0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdStatus), nullptr, nullptr);
+      SendMessageW(gGamePath, WM_SETFONT, reinterpret_cast<WPARAM>(gFontRegular), TRUE);
+
+      gBrowseBtn = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdBrowseGame), nullptr, nullptr);
+      SendMessageW(gBrowseBtn, WM_SETFONT, reinterpret_cast<WPARAM>(gFontRegular), TRUE);
+
+      // Primary Launch Sky button (Owner-drawn for flat Steam blue appearance)
+      gLaunchBtn = CreateWindowW(L"BUTTON", L"LAUNCH SKY",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                 0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdLaunchGame), nullptr, nullptr);
+      gOrigLaunchBtnProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+          gLaunchBtn, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(launchButtonSubclass)));
+
+      gStatus = CreateWindowW(L"STATIC", L"Ready. Start Sky from Steam or click Launch Sky.",
+                              WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window,
+                              reinterpret_cast<HMENU>(kIdStatus), nullptr, nullptr);
+      SendMessageW(gStatus, WM_SETFONT, reinterpret_cast<WPARAM>(gFontSemibold), TRUE);
+
       loadSettings();
-      // Behave like ThatSkyApp's auto-inject mode even if the user starts
-      // Sky from the Steam client instead of pressing Launch Sky here.
       requestAutoInject();
       SetTimer(window, kAutoInjectTimer, kAutoInjectPollMs, nullptr);
       return 0;
     }
+
     case WM_SIZE:
       layout(window);
       return 0;
+
+    case WM_GETMINMAXINFO: {
+      LPMINMAXINFO mmi = reinterpret_cast<LPMINMAXINFO>(lParam);
+      mmi->ptMinTrackSize.x = 640;
+      mmi->ptMinTrackSize.y = 450;
+      return 0;
+    }
+
+    case WM_ERASEBKGND:
+      return 1;
+
+    case WM_PAINT: {
+      PAINTSTRUCT ps{};
+      HDC hdc = BeginPaint(window, &ps);
+      RECT client{};
+      GetClientRect(window, &client);
+
+      const int footerTop = client.bottom - 100;
+
+      // Fill top area with Slate-50
+      RECT topRect{0, 0, client.right, footerTop};
+      FillRect(hdc, &topRect, gBgBrush);
+
+      // Draw footer background card (white)
+      RECT footerRect{0, footerTop, client.right, client.bottom};
+      FillRect(hdc, &footerRect, gFooterBrush);
+
+      // Draw 1px crisp separator line above footer (Slate-200)
+      HPEN pen = CreatePen(PS_SOLID, 1, RGB(226, 232, 240));
+      HGDIOBJ oldPen = SelectObject(hdc, pen);
+      MoveToEx(hdc, 0, footerTop, nullptr);
+      LineTo(hdc, client.right, footerTop);
+      SelectObject(hdc, oldPen);
+      DeleteObject(pen);
+
+      EndPaint(window, &ps);
+      return 0;
+    }
+
+    case WM_DRAWITEM: {
+      LPDRAWITEMSTRUCT dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+      if (dis->CtlID == kIdAddDll) {
+        const bool isDown = (dis->itemState & ODS_SELECTED);
+        COLORREF fillCol = isDown ? RGB(7, 89, 133)
+                                  : (gAddDllHover ? RGB(3, 105, 161) : RGB(2, 132, 199));
+
+        HBRUSH brush = CreateSolidBrush(fillCol);
+        FillRect(dis->hDC, &dis->rcItem, brush);
+        DeleteObject(brush);
+
+        HPEN borderPen = CreatePen(PS_SOLID, 1, isDown ? RGB(7, 89, 133) : RGB(2, 132, 199));
+        HGDIOBJ oldPen = SelectObject(dis->hDC, borderPen);
+        HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+        Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
+        SelectObject(dis->hDC, oldPen);
+        SelectObject(dis->hDC, oldBrush);
+        DeleteObject(borderPen);
+
+        SetBkMode(dis->hDC, TRANSPARENT);
+        SetTextColor(dis->hDC, RGB(255, 255, 255));
+        HGDIOBJ oldFont = SelectObject(dis->hDC, gFontSemibold);
+        RECT textRect = dis->rcItem;
+        if (isDown) OffsetRect(&textRect, 1, 1);
+        DrawTextW(dis->hDC, L"Add DLL...", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dis->hDC, oldFont);
+        return TRUE;
+      }
+
+      if (dis->CtlID == kIdLaunchGame) {
+        const bool isDown = (dis->itemState & ODS_SELECTED);
+        COLORREF fillCol = isDown ? RGB(7, 89, 133)
+                                  : (gLaunchHover ? RGB(3, 105, 161) : RGB(2, 132, 199));
+
+        HBRUSH brush = CreateSolidBrush(fillCol);
+        FillRect(dis->hDC, &dis->rcItem, brush);
+        DeleteObject(brush);
+
+        HPEN borderPen = CreatePen(PS_SOLID, 1, isDown ? RGB(7, 89, 133) : RGB(2, 132, 199));
+        HGDIOBJ oldPen = SelectObject(dis->hDC, borderPen);
+        HGDIOBJ oldBrush = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+        Rectangle(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom);
+        SelectObject(dis->hDC, oldPen);
+        SelectObject(dis->hDC, oldBrush);
+        DeleteObject(borderPen);
+
+        SetBkMode(dis->hDC, TRANSPARENT);
+        SetTextColor(dis->hDC, RGB(255, 255, 255));
+        HGDIOBJ oldFont = SelectObject(dis->hDC, gFontLaunchBtn);
+        RECT textRect = dis->rcItem;
+        if (isDown) OffsetRect(&textRect, 1, 1);
+        DrawTextW(dis->hDC, L"LAUNCH SKY", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dis->hDC, oldFont);
+        return TRUE;
+      }
+      break;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+      HDC hdc = reinterpret_cast<HDC>(wParam);
+      HWND hwndCtl = reinterpret_cast<HWND>(lParam);
+      SetBkMode(hdc, TRANSPARENT);
+
+      if (hwndCtl == gHintText) {
+        SetTextColor(hdc, RGB(100, 116, 139)); // Slate-500
+        return reinterpret_cast<INT_PTR>(gBgBrush);
+      } else if (hwndCtl == gPluginsTitle) {
+        SetTextColor(hdc, RGB(71, 85, 105)); // Slate-600
+        return reinterpret_cast<INT_PTR>(gBgBrush);
+      } else if (hwndCtl == gStatus) {
+        SetTextColor(hdc, RGB(2, 132, 199)); // Sky-600
+        return reinterpret_cast<INT_PTR>(gFooterBrush);
+      } else if (hwndCtl == gGamePathLabel) {
+        SetTextColor(hdc, RGB(30, 41, 59)); // Slate-800
+        return reinterpret_cast<INT_PTR>(gFooterBrush);
+      }
+      return reinterpret_cast<INT_PTR>(gBgBrush);
+    }
+
+    case WM_NOTIFY: {
+      LPNMHDR hdr = reinterpret_cast<LPNMHDR>(lParam);
+      if (hdr->idFrom == kIdDllList) {
+        if (hdr->code == LVN_ITEMCHANGED && !gIgnoreItemChanged) {
+          NMLISTVIEW* pnmv = reinterpret_cast<NMLISTVIEW*>(lParam);
+          if (pnmv->uChanged & LVIF_STATE) {
+            const UINT oldState = pnmv->uOldState & LVIS_STATEIMAGEMASK;
+            const UINT newState = pnmv->uNewState & LVIS_STATEIMAGEMASK;
+            if (oldState != newState && newState != 0) {
+              const bool checked = ((newState >> 12) == 2);
+              if (pnmv->iItem >= 0 && static_cast<size_t>(pnmv->iItem) < gPlugins.size()) {
+                gPlugins[pnmv->iItem].enabled = checked;
+                ListView_SetItemText(gDllList, pnmv->iItem, 1,
+                                     const_cast<wchar_t*>(checked ? L"Enabled" : L"Disabled"));
+                saveSettings();
+              }
+            }
+          }
+        } else if (hdr->code == NM_DBLCLK) {
+          const int selected = ListView_GetNextItem(gDllList, -1, LVNI_SELECTED);
+          if (selected >= 0 && static_cast<size_t>(selected) < gPlugins.size()) {
+            const BOOL current = ListView_GetCheckState(gDllList, selected);
+            ListView_SetCheckState(gDllList, selected, !current);
+          }
+        }
+      }
+      break;
+    }
+
+    case WM_DROPFILES: {
+      HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+      const UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+      bool anyAdded = false;
+      for (UINT i = 0; i < count; ++i) {
+        wchar_t filePath[MAX_PATH]{};
+        if (DragQueryFileW(hDrop, i, filePath, MAX_PATH)) {
+          const std::wstring path = normalizedPath(filePath);
+          if (path.size() >= 4 &&
+              CompareStringOrdinal(path.c_str() + path.size() - 4, -1, L".dll", -1, TRUE) == CSTR_EQUAL) {
+            std::wstring importedPath;
+            std::wstring importError;
+            if (importPlugin(path, importedPath, importError)) {
+              auto it = std::find_if(gPlugins.begin(), gPlugins.end(), [&](const PluginItem& item) {
+                return samePath(item.path, importedPath);
+              });
+              if (it == gPlugins.end()) {
+                gPlugins.push_back({importedPath, true});
+                anyAdded = true;
+              }
+            }
+          }
+        }
+      }
+      DragFinish(hDrop);
+      if (anyAdded) {
+        populateDllList();
+        saveSettings();
+        setStatus(L"Plugin(s) added via drag and drop.");
+      }
+      return 0;
+    }
+
     case WM_COMMAND: {
       switch (LOWORD(wParam)) {
         case kIdBrowseGame: {
@@ -329,22 +691,20 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             setStatus(L"Sky.exe is already running; loading Bootstrap now.");
             return 0;
           }
-          // Sky must be started through Steam. Launching the executable itself
-          // makes Sky reject the session before a mod can be injected.
           const HINSTANCE result = ShellExecuteW(window, L"open", kSkySteamUri, nullptr, nullptr, SW_SHOWNORMAL);
           setStatus(reinterpret_cast<INT_PTR>(result) <= 32
             ? L"Could not open Steam. Install or start Steam and try again."
-            : L"Steam was asked to start Sky. Waiting for Sky.exe before loading DLLs.");
+            : L"Steam was asked to start Sky. Waiting for Sky.exe...");
           saveSettings();
           return 0;
         }
         case kIdAddDll: {
           std::wstring path;
-          if (chooseFile(window, L"Dynamic-link libraries\0*.dll\0\0", path)) {
+          if (chooseFile(window, L"Dynamic-link libraries (*.dll)\0*.dll\0\0", path)) {
             const std::wstring identity = pluginIdentity(path);
             bool replacing = false;
-            for (const auto& registered : gDllPaths) {
-              if (CompareStringOrdinal(pluginIdentity(registered).c_str(), -1,
+            for (const auto& registered : gPlugins) {
+              if (CompareStringOrdinal(pluginIdentity(registered.path).c_str(), -1,
                                        identity.c_str(), -1, TRUE) == CSTR_EQUAL) {
                 replacing = true;
                 break;
@@ -352,7 +712,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
             if (replacing && MessageBoxW(window,
                 L"A plugin with this name is already imported. Replace it?",
-                L"Update plugin", MB_YESNO | MB_ICONQUESTION) != IDYES)
+                L"Update Plugin", MB_YESNO | MB_ICONQUESTION) != IDYES)
               return 0;
             std::wstring importedPath;
             std::wstring importError;
@@ -360,60 +720,53 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
               setStatus(importError);
               return 0;
             }
-            std::vector<std::wstring> updatedPaths;
+            std::vector<PluginItem> updatedPaths;
             bool replacedEntry = false;
-            for (const auto& registered : gDllPaths) {
-              const bool samePlugin = CompareStringOrdinal(pluginIdentity(registered).c_str(), -1,
+            for (const auto& registered : gPlugins) {
+              const bool samePlugin = CompareStringOrdinal(pluginIdentity(registered.path).c_str(), -1,
                                                            identity.c_str(), -1, TRUE) == CSTR_EQUAL;
               if (!samePlugin) {
                 updatedPaths.push_back(registered);
                 continue;
               }
               if (!replacedEntry) {
-                updatedPaths.push_back(importedPath);
+                updatedPaths.push_back({importedPath, registered.enabled});
                 replacedEntry = true;
-              } else if (isManagedPluginPath(registered) && !samePath(registered, importedPath)) {
-                DeleteFileW(registered.c_str());
+              } else if (isManagedPluginPath(registered.path) && !samePath(registered.path, importedPath)) {
+                DeleteFileW(registered.path.c_str());
               }
             }
-            if (!replacedEntry) updatedPaths.push_back(importedPath);
-            gDllPaths = std::move(updatedPaths);
+            if (!replacedEntry) updatedPaths.push_back({importedPath, true});
+            gPlugins = std::move(updatedPaths);
             populateDllList();
             saveSettings();
-            setStatus(replacing ? L"Plugin updated in SkyLoader's managed directory."
-                                : L"DLL imported into SkyLoader's managed plugin directory.");
+            setStatus(replacing ? L"Plugin updated." : L"Plugin imported into managed directory.");
+          }
+          return 0;
+        }
+        case kIdOpenFolder: {
+          const std::wstring dir = managedPluginDirectory();
+          if (!dir.empty()) {
+            ShellExecuteW(window, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
           }
           return 0;
         }
         case kIdRemoveDll: {
           const int selected = ListView_GetNextItem(gDllList, -1, LVNI_SELECTED);
-          if (selected < 0) setStatus(L"Select a DLL first.");
-          else {
-            gDllPaths.erase(gDllPaths.begin() + selected);
+          if (selected < 0 || static_cast<size_t>(selected) >= gPlugins.size()) {
+            setStatus(L"Select a plugin first.");
+          } else {
+            gPlugins.erase(gPlugins.begin() + selected);
             populateDllList();
             saveSettings();
-            setStatus(L"DLL removed from the list; the original file was not deleted.");
+            setStatus(L"Plugin removed from the list; original file was not deleted.");
           }
-          return 0;
-        }
-        case kIdRefresh:
-          loadSettings();
-          setStatus(L"Reloaded the saved DLL list.");
-          return 0;
-        case kIdInject: {
-          const std::wstring path = selectedPath();
-          if (path.empty()) { setStatus(L"Select a DLL to inject first."); return 0; }
-          if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) { setStatus(L"The DLL file no longer exists."); return 0; }
-          wchar_t configuredPath[MAX_PATH]{};
-          GetWindowTextW(gGamePath, configuredPath, MAX_PATH);
-          const DWORD pid = findSkyProcess(configuredPath);
-          if (!pid) { setStatus(L"The configured Sky.exe is not running."); return 0; }
-          loadSelectedPluginViaController(path, pid);
           return 0;
         }
       }
       break;
     }
+
     case WM_TIMER:
       if (wParam == kAutoInjectTimer && gAutoInjectPending) {
         wchar_t configuredPath[MAX_PATH]{};
@@ -428,20 +781,28 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
           gPendingSkyTicks = 0;
           setStatus(L"Sky.exe detected; loading Bootstrap DLL...");
         }
-        // Inject before renderer startup. The DLL itself waits for game
-        // signatures, so it does not touch Lua until Sky is ready.
         gAutoInjectPending = false;
         autoInjectViaController(currentPid);
       }
       return 0;
+
     case WM_DESTROY:
       KillTimer(window, kAutoInjectTimer);
       saveSettings();
+
+      if (gFontRegular) DeleteObject(gFontRegular);
+      if (gFontSemibold) DeleteObject(gFontSemibold);
+      if (gFontBold) DeleteObject(gFontBold);
+      if (gFontLaunchBtn) DeleteObject(gFontLaunchBtn);
+      if (gBgBrush) DeleteObject(gBgBrush);
+      if (gFooterBrush) DeleteObject(gFooterBrush);
+
       PostQuitMessage(0);
       return 0;
   }
   return DefWindowProcW(window, message, wParam, lParam);
 }
+
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
@@ -454,7 +815,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   windowClass.lpszClassName = L"SkyLoaderWindow";
   windowClass.lpfnWndProc = windowProc;
   windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-  windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+  windowClass.hbrBackground = nullptr; // Handled in WM_ERASEBKGND / WM_PAINT
   windowClass.hIcon = static_cast<HICON>(LoadImageW(instance, L"IDI_SKYLOADER_ICON", IMAGE_ICON,
                                                      GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
                                                      LR_DEFAULTCOLOR));
@@ -466,7 +827,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   if (!RegisterClassExW(&windowClass)) return 1;
 
   HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"SkyLoader",
-                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 520,
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 780, 540,
                                 nullptr, nullptr, instance, nullptr);
   if (!window) return 1;
   ShowWindow(window, showCommand);

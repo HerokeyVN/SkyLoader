@@ -7,7 +7,7 @@ BOOTSTRAP_DIR := libraries/SkyBootstrap
 CXX := g++
 WINDRES := windres
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode
-LDFLAGS := -mwindows -static -static-libgcc -static-libstdc++ -lcomctl32 -lshell32
+LDFLAGS := -mwindows -static -static-libgcc -static-libstdc++ -lcomctl32 -lshell32 -lgdi32 -luxtheme
 
 .PHONY: all clean bootstrap
 

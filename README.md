@@ -1,23 +1,7 @@
 # SkyLoader
 
 SkyLoader is a Windows launcher and local DLL manager for **Sky: Children of
-the Light**. It starts Sky through Steam, injects `SkyBootstrap.dll` when the
-configured `Sky.exe` appears, then asks Bootstrap to load registered plugins.
-
-This branch uses the **D3D11 host-window** design: Sky's Vulkan renderer is not
-hooked, subclassed, or configured. A plugin that needs UI owns a separate Win32
-window and D3D11 device. SkyToolkit uses this design for its transparent ImGui
-host window.
-
-## Features
-
-- Launch Sky through Steam and match the configured canonical executable path.
-- Import DLLs into `%LOCALAPPDATA%\SkyLoader\plugins` so source files can be
-  safely moved or deleted after import.
-- Replace an existing managed plugin when it is imported again.
-- Inject Bootstrap and load plugin DLLs through a local named pipe.
-- Keep Sky's Vulkan presentation path untouched.
-- Persist game path and plugin entries in `SkyLoader.ini`.
+the Light**. It starts Sky through Steam.
 
 ## Runtime layout
 

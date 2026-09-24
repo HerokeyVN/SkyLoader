@@ -85,7 +85,7 @@ SkyPluginInit(const SkyBootstrapApi*)
 
 ## Logs
 
-Bootstrap writes `SkyBootstrap.log` next to itself in `dist/`. If a plugin fails to load, check that the managed DLL exists at the path recorded in `SkyLoader.ini`, that both DLLs are 64-bit, and that the configured `GamePath` is the running Sky executable.
+Bootstrap writes `SkyBootstrap.log` to `%LOCALAPPDATA%\SkyLoader\logs\SkyBootstrap.log`. If that directory cannot be created, it falls back to writing the log next to `SkyBootstrap.dll`. If a plugin fails to load, check that the managed DLL exists at the path recorded in `SkyLoader.ini`, that both DLLs are 64-bit, and that the configured `GamePath` is the running Sky executable.
 
 ---
 

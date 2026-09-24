@@ -10,7 +10,7 @@ layer, renderer hook, or game-window subclassing code.
 - Load requested 64-bit plugin DLLs.
 - Call the required `SkyPluginInit(const SkyBootstrapApi*)` entry point.
 - Keep loaded plugins alive for the game-process lifetime.
-- Write diagnostics to `SkyBootstrap.log` beside the DLL.
+- Write diagnostics to `%LOCALAPPDATA%\SkyLoader\logs\SkyBootstrap.log`, falling back to the DLL directory if the log directory is unavailable.
 
 Plugins that need a UI create their own host window and rendering device. For
 example, SkyToolkit owns a transparent D3D11 + ImGui window, so failures in its

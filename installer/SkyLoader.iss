@@ -1,5 +1,5 @@
 #define MyAppName "Sky Loader"
-#define MyAppVersion "0.0.3"
+#define MyAppVersion "0.0.4"
 #define MyAppPublisher "HerokeyVN"
 #define MyAppExeName "SkyLoader.exe"
 
@@ -31,6 +31,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Files]
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\SkyBootstrap.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\SkyOverlay.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "SkyBootstrap.ini"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion

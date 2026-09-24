@@ -1036,7 +1036,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   if (!windowClass.hIconSm) windowClass.hIconSm = windowClass.hIcon;
   if (!RegisterClassExW(&windowClass)) return 1;
 
-  HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"SkyLoader",
+  HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"SkyLoader (v0.0.4)",
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 780, 540,
                                 nullptr, nullptr, instance, nullptr);

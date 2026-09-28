@@ -1,5 +1,5 @@
 #define MyAppName "Sky Loader"
-#define MyAppVersion "0.0.5"
+#define MyAppVersion "0.1.0"
 #define MyAppPublisher "HerokeyVN"
 #define MyAppExeName "SkyLoader.exe"
 

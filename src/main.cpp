@@ -31,7 +31,7 @@ constexpr int kIdRemoveDll = 1007;
 constexpr int kIdStatus = 1008;
 constexpr int kIdCheckUpdates = 1009;
 
-constexpr wchar_t kAppVersion[] = L"0.0.5";
+constexpr wchar_t kAppVersion[] = L"0.1.0";
 constexpr wchar_t kReleasePageUrl[] = L"https://github.com/HerokeyVN/SkyLoader/releases";
 constexpr wchar_t kSkySteamUri[] = L"steam://run/2325290";
 constexpr UINT_PTR kAutoInjectTimer = 1;
@@ -1258,7 +1258,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   if (!windowClass.hIconSm) windowClass.hIconSm = windowClass.hIcon;
   if (!RegisterClassExW(&windowClass)) return 1;
 
-  HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"SkyLoader (v0.0.5)",
+  HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"SkyLoader (v0.1.0)",
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 780, 540,
                                 nullptr, nullptr, instance, nullptr);

@@ -59,6 +59,8 @@ iscc installer\SkyLoader.iss
 
 SkyLoader's process watcher also catches Sky started directly from Steam. Use **Inject selected** to ask the running Bootstrap host to load one plugin again.
 
+SkyLoader checks the latest GitHub release on startup and also exposes **Check Updates** in the toolbar. When a newer release exists, it opens the release page so the user can download the installer manually.
+
 ---
 
 ## Rapid UI Prototyping with SkyOverlay

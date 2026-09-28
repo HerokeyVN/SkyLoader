@@ -8,6 +8,32 @@
 LoaderController::LoaderController(std::wstring bootstrapPath, std::vector<std::wstring> plugins)
     : bootstrapPath_(std::move(bootstrapPath)), plugins_(std::move(plugins)) {}
 
+namespace {
+
+std::wstring directoryOf(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? L"." : path.substr(0, slash);
+}
+
+std::wstring fileNameOf(const std::wstring& path) {
+  const size_t slash = path.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+bool sameText(const std::wstring& first, const std::wstring& second) {
+  return CompareStringOrdinal(first.c_str(), -1, second.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+bool isSkyOverlayPath(const std::wstring& path) {
+  return sameText(fileNameOf(path), L"SkyOverlay.dll");
+}
+
+std::wstring siblingSkyOverlayPath(const std::wstring& bootstrapPath) {
+  return directoryOf(bootstrapPath) + L"\\SkyOverlay.dll";
+}
+
+}  // namespace
+
 bool LoaderController::injectDll(unsigned long processId, const std::wstring& path, std::wstring& error) const {
   HANDLE process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                                PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
@@ -98,14 +124,33 @@ bool LoaderController::sendUnloadCommand(const std::wstring& path) const {
 LoaderResult LoaderController::installBootstrapAndPlugins(unsigned long processId) const {
   LoaderResult bootstrap = installBootstrap(processId);
   if (!bootstrap.ok) return bootstrap;
+
+  const std::wstring overlayPath = siblingSkyOverlayPath(bootstrapPath_);
+  bool overlayRequested = false;
+  bool overlayLoaded = false;
+  if (GetFileAttributesW(overlayPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    overlayRequested = true;
+    overlayLoaded = sendLoadCommand(overlayPath);
+  }
+
   unsigned requested = 0;
   unsigned loaded = 0;
   for (const auto& plugin : plugins_) {
     if (GetFileAttributesW(plugin.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+    if (isSkyOverlayPath(plugin)) continue;
     ++requested;
     if (sendLoadCommand(plugin)) ++loaded;
   }
-  if (loaded == requested) return {loaded, L"Bootstrap and registered plugins loaded.", true};
+
+  if (loaded == requested && (!overlayRequested || overlayLoaded)) {
+    return {loaded, overlayRequested
+        ? L"Bootstrap, SkyOverlay, and registered plugins loaded."
+        : L"Bootstrap and registered plugins loaded.", true};
+  }
+
+  if (loaded == requested && overlayRequested && !overlayLoaded) {
+    return {loaded, L"Registered plugins loaded, but SkyOverlay was not accepted by Bootstrap.", false};
+  }
   return {loaded, L"Bootstrap loaded; one or more plugins were not accepted by its pipe.", false};
 }
 
@@ -119,6 +164,12 @@ LoaderResult LoaderController::installBootstrap(unsigned long processId) const {
 LoaderResult LoaderController::loadPlugin(unsigned long processId, const std::wstring& pluginPath) const {
   LoaderResult bootstrap = installBootstrap(processId);
   if (!bootstrap.ok) return bootstrap;
+  if (!isSkyOverlayPath(pluginPath)) {
+    const std::wstring overlayPath = siblingSkyOverlayPath(bootstrapPath_);
+    if (GetFileAttributesW(overlayPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      sendLoadCommand(overlayPath);
+    }
+  }
   if (!sendLoadCommand(pluginPath)) return {0, L"SkyBootstrap pipe failed to load plugin.", false};
   return {1, L"SkyBootstrap loaded the selected plugin.", true};
 }

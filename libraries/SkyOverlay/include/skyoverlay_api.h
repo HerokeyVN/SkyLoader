@@ -52,6 +52,18 @@ SKYOVERLAY_API int SKYOVERLAY_CALL SkyOverlayRegisterPluginWindow(
     int defaultVisible);
 
 /**
+ * @brief Registers a named plugin window with a hotkey that can include Win32 MOD_* modifiers.
+ *
+ * @param defaultModifiers Win32 RegisterHotKey modifiers, e.g. MOD_ALT | MOD_NOREPEAT.
+ */
+SKYOVERLAY_API int SKYOVERLAY_CALL SkyOverlayRegisterPluginWindowEx(
+    const char* name,
+    SkyOverlayRenderFn callback,
+    uint32_t defaultModifiers,
+    uint32_t defaultVk,
+    int defaultVisible);
+
+/**
  * @brief Unregisters a named plugin window by ID.
  * @param windowId The window ID returned by SkyOverlayRegisterPluginWindow.
  */
@@ -77,6 +89,14 @@ SKYOVERLAY_API void SKYOVERLAY_CALL SkyOverlaySetPluginWindowVisible(int windowI
  * @param vk Virtual Key code (0 to disable hotkey).
  */
 SKYOVERLAY_API void SKYOVERLAY_CALL SkyOverlaySetPluginWindowHotkey(int windowId, uint32_t vk);
+
+/**
+ * @brief Sets the dedicated hotkey and Win32 MOD_* modifiers for a registered plugin window.
+ */
+SKYOVERLAY_API void SKYOVERLAY_CALL SkyOverlaySetPluginWindowHotkeyEx(
+    int windowId,
+    uint32_t modifiers,
+    uint32_t vk);
 
 /**
  * @brief Controls the visibility of the central SkyOverlay Plugin Manager window.

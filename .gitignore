@@ -10,6 +10,7 @@ dist/installer/
 SkyLoader.ini
 dist/SkyLoader.ini
 dist/SkyBootstrap.ini
+dist/SkyOverlay.ini
 
 # IDE and editor files
 .vscode/

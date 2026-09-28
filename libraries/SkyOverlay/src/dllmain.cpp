@@ -49,6 +49,15 @@ SKYOVERLAY_API int SKYOVERLAY_CALL SkyOverlayRegisterPluginWindow(
   return skyoverlay::registerPluginWindow(name, callback, defaultVk, defaultVisible);
 }
 
+SKYOVERLAY_API int SKYOVERLAY_CALL SkyOverlayRegisterPluginWindowEx(
+    const char* name,
+    SkyOverlayRenderFn callback,
+    uint32_t defaultModifiers,
+    uint32_t defaultVk,
+    int defaultVisible) {
+  return skyoverlay::registerPluginWindowEx(name, callback, defaultModifiers, defaultVk, defaultVisible);
+}
+
 SKYOVERLAY_API void SKYOVERLAY_CALL SkyOverlayUnregisterPluginWindow(int windowId) {
   skyoverlay::unregisterPluginWindow(windowId);
 }
@@ -63,6 +72,13 @@ SKYOVERLAY_API void SKYOVERLAY_CALL SkyOverlaySetPluginWindowVisible(int windowI
 
 SKYOVERLAY_API void SKYOVERLAY_CALL SkyOverlaySetPluginWindowHotkey(int windowId, uint32_t vk) {
   skyoverlay::setPluginWindowHotkey(windowId, vk);
+}
+
+SKYOVERLAY_API void SKYOVERLAY_CALL SkyOverlaySetPluginWindowHotkeyEx(
+    int windowId,
+    uint32_t modifiers,
+    uint32_t vk) {
+  skyoverlay::setPluginWindowHotkeyEx(windowId, modifiers, vk);
 }
 
 SKYOVERLAY_API void SKYOVERLAY_CALL SkyOverlayShowManager(int show) {

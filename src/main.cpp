@@ -5,8 +5,10 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <uxtheme.h>
+#include <winhttp.h>
 
 #include <algorithm>
+#include <cwctype>
 #include <memory>
 #include <string>
 #include <thread>
@@ -17,6 +19,7 @@
 namespace {
 
 constexpr UINT WM_INJECTION_COMPLETE = WM_USER + 101;
+constexpr UINT WM_UPDATE_CHECK_COMPLETE = WM_USER + 102;
 
 constexpr int kIdGamePath = 1001;
 constexpr int kIdBrowseGame = 1002;
@@ -26,7 +29,10 @@ constexpr int kIdAddDll = 1005;
 constexpr int kIdOpenFolder = 1006;
 constexpr int kIdRemoveDll = 1007;
 constexpr int kIdStatus = 1008;
+constexpr int kIdCheckUpdates = 1009;
 
+constexpr wchar_t kAppVersion[] = L"0.0.5";
+constexpr wchar_t kReleasePageUrl[] = L"https://github.com/HerokeyVN/SkyLoader/releases";
 constexpr wchar_t kSkySteamUri[] = L"steam://run/2325290";
 constexpr UINT_PTR kAutoInjectTimer = 1;
 constexpr UINT kAutoInjectPollMs = 50;
@@ -41,6 +47,7 @@ HWND gPluginsTitle = nullptr;
 HWND gAddDllBtn = nullptr;
 HWND gOpenFolderBtn = nullptr;
 HWND gRemoveDllBtn = nullptr;
+HWND gCheckUpdatesBtn = nullptr;
 HWND gDllList = nullptr;
 HWND gHintText = nullptr;
 HWND gGamePathLabel = nullptr;
@@ -62,6 +69,7 @@ bool gLaunchHover = false;
 WNDPROC gOrigAddDllBtnProc = nullptr;
 bool gAddDllHover = false;
 bool gIgnoreItemChanged = false;
+bool gUpdateCheckInProgress = false;
 
 std::wstring gIniPath;
 std::wstring gBootstrapPath;
@@ -69,6 +77,15 @@ std::vector<PluginItem> gPlugins;
 bool gAutoInjectPending = false;
 DWORD gPendingSkyPid = 0;
 UINT gPendingSkyTicks = 0;
+
+struct UpdateCheckResult {
+  bool manual{};
+  bool ok{};
+  bool updateAvailable{};
+  std::wstring latestVersion;
+  std::wstring releaseUrl;
+  std::wstring message;
+};
 
 std::wstring moduleDirectory() {
   wchar_t path[MAX_PATH]{};
@@ -151,6 +168,176 @@ void setStatus(const std::wstring& text) {
   if (gStatus) {
     SetWindowTextW(gStatus, text.c_str());
   }
+}
+
+std::wstring utf8ToWide(const std::string& value) {
+  if (value.empty()) return L"";
+  const int needed = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()),
+                                         nullptr, 0);
+  if (needed <= 0) return L"";
+  std::wstring wide(static_cast<size_t>(needed), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()),
+                      &wide[0], needed);
+  return wide;
+}
+
+std::string findJsonString(const std::string& json, const char* key) {
+  const std::string marker = std::string("\"") + key + "\"";
+  size_t pos = json.find(marker);
+  if (pos == std::string::npos) return "";
+  pos = json.find(':', pos + marker.size());
+  if (pos == std::string::npos) return "";
+  pos = json.find('"', pos + 1);
+  if (pos == std::string::npos) return "";
+  std::string result;
+  bool escaped = false;
+  for (++pos; pos < json.size(); ++pos) {
+    const char ch = json[pos];
+    if (escaped) {
+      result.push_back(ch);
+      escaped = false;
+      continue;
+    }
+    if (ch == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch == '"') break;
+    result.push_back(ch);
+  }
+  return result;
+}
+
+std::wstring normalizedVersion(std::wstring version) {
+  while (!version.empty() && iswspace(version.front())) version.erase(version.begin());
+  while (!version.empty() && iswspace(version.back())) version.pop_back();
+  if (!version.empty() && (version.front() == L'v' || version.front() == L'V'))
+    version.erase(version.begin());
+  return version;
+}
+
+int nextVersionNumber(const std::wstring& version, size_t& pos) {
+  while (pos < version.size() && !iswdigit(version[pos])) ++pos;
+  int value = 0;
+  while (pos < version.size() && iswdigit(version[pos])) {
+    value = value * 10 + static_cast<int>(version[pos] - L'0');
+    ++pos;
+  }
+  return value;
+}
+
+int compareVersions(std::wstring first, std::wstring second) {
+  first = normalizedVersion(first);
+  second = normalizedVersion(second);
+  size_t a = 0;
+  size_t b = 0;
+  for (int i = 0; i < 4; ++i) {
+    const int av = nextVersionNumber(first, a);
+    const int bv = nextVersionNumber(second, b);
+    if (av != bv) return av < bv ? -1 : 1;
+  }
+  return CompareStringOrdinal(first.c_str(), -1, second.c_str(), -1, TRUE) == CSTR_EQUAL ? 0 :
+         (first < second ? -1 : 1);
+}
+
+bool fetchLatestRelease(UpdateCheckResult& result) {
+  const std::wstring userAgent = std::wstring(L"SkyLoader/") + kAppVersion;
+  HINTERNET session = WinHttpOpen(userAgent.c_str(),
+                                  WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                  WINHTTP_NO_PROXY_NAME,
+                                  WINHTTP_NO_PROXY_BYPASS, 0);
+  if (!session) {
+    result.message = L"Could not start WinHTTP.";
+    return false;
+  }
+
+  HINTERNET connection = WinHttpConnect(session, L"api.github.com",
+                                        INTERNET_DEFAULT_HTTPS_PORT, 0);
+  if (!connection) {
+    WinHttpCloseHandle(session);
+    result.message = L"Could not connect to GitHub.";
+    return false;
+  }
+
+  HINTERNET request = WinHttpOpenRequest(
+      connection, L"GET", L"/repos/HerokeyVN/SkyLoader/releases/latest",
+      nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+  if (!request) {
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    result.message = L"Could not create GitHub request.";
+    return false;
+  }
+
+  const wchar_t headers[] = L"Accept: application/vnd.github+json\r\n"
+                            L"X-GitHub-Api-Version: 2022-11-28\r\n";
+  bool ok = WinHttpSendRequest(request, headers, static_cast<DWORD>(-1),
+                               WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+            WinHttpReceiveResponse(request, nullptr);
+
+  DWORD status = 0;
+  DWORD statusSize = sizeof(status);
+  WinHttpQueryHeaders(request,
+                      WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                      WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
+                      WINHTTP_NO_HEADER_INDEX);
+
+  std::string body;
+  if (ok) {
+    for (;;) {
+      DWORD available = 0;
+      if (!WinHttpQueryDataAvailable(request, &available) || available == 0) break;
+      std::string chunk(available, '\0');
+      DWORD read = 0;
+      if (!WinHttpReadData(request, &chunk[0], available, &read) || read == 0) break;
+      chunk.resize(read);
+      body += chunk;
+    }
+  }
+
+  WinHttpCloseHandle(request);
+  WinHttpCloseHandle(connection);
+  WinHttpCloseHandle(session);
+
+  if (!ok || status < 200 || status >= 300) {
+    result.message = status == 404
+      ? L"No GitHub release has been published yet."
+      : L"GitHub update check failed.";
+    return false;
+  }
+
+  result.latestVersion = utf8ToWide(findJsonString(body, "tag_name"));
+  result.releaseUrl = utf8ToWide(findJsonString(body, "html_url"));
+  if (result.latestVersion.empty()) {
+    result.message = L"GitHub release response did not include a version.";
+    return false;
+  }
+  if (result.releaseUrl.empty()) result.releaseUrl = kReleasePageUrl;
+  result.updateAvailable = compareVersions(kAppVersion, result.latestVersion) < 0;
+  result.ok = true;
+  result.message = result.updateAvailable
+    ? L"Update available: " + result.latestVersion
+    : L"SkyLoader is up to date.";
+  return true;
+}
+
+void startUpdateCheck(HWND owner, bool manual) {
+  if (gUpdateCheckInProgress) {
+    if (manual) setStatus(L"Update check is already running...");
+    return;
+  }
+  gUpdateCheckInProgress = true;
+  if (manual) setStatus(L"Checking GitHub releases...");
+  std::thread([owner, manual]() {
+    auto* result = new UpdateCheckResult();
+    result->manual = manual;
+    fetchLatestRelease(*result);
+    if (IsWindow(owner)) {
+      PostMessageW(owner, WM_UPDATE_CHECK_COMPLETE, reinterpret_cast<WPARAM>(result), 0);
+    } else {
+      delete result;
+    }
+  }).detach();
 }
 
 void populateDllList() {
@@ -504,11 +691,13 @@ void layout(HWND window) {
   const int addBtnW = 100;
   const int openFolderBtnW = 100;
   const int removeBtnW = 85;
+  const int updateBtnW = 115;
 
   MoveWindow(gPluginsTitle, margin, 18, 150, 20, TRUE);
-  MoveWindow(gRemoveDllBtn, width - margin - removeBtnW, 14, removeBtnW, btnHeight, TRUE);
-  MoveWindow(gOpenFolderBtn, width - margin - removeBtnW - 8 - openFolderBtnW, 14, openFolderBtnW, btnHeight, TRUE);
-  MoveWindow(gAddDllBtn, width - margin - removeBtnW - 8 - openFolderBtnW - 8 - addBtnW, 14, addBtnW, btnHeight, TRUE);
+  MoveWindow(gCheckUpdatesBtn, width - margin - updateBtnW, 14, updateBtnW, btnHeight, TRUE);
+  MoveWindow(gOpenFolderBtn, width - margin - updateBtnW - 8 - openFolderBtnW, 14, openFolderBtnW, btnHeight, TRUE);
+  MoveWindow(gRemoveDllBtn, width - margin - updateBtnW - 8 - openFolderBtnW - 8 - removeBtnW, 14, removeBtnW, btnHeight, TRUE);
+  MoveWindow(gAddDllBtn, width - margin - removeBtnW - 8 - openFolderBtnW - 8 - updateBtnW - 8 - addBtnW, 14, addBtnW, btnHeight, TRUE);
 
   // Plugins list
   const int listTop = 50;
@@ -592,6 +781,10 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                                     0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdRemoveDll), nullptr, nullptr);
       SendMessageW(gRemoveDllBtn, WM_SETFONT, reinterpret_cast<WPARAM>(gFontRegular), TRUE);
 
+      gCheckUpdatesBtn = CreateWindowW(L"BUTTON", L"Check Updates", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                       0, 0, 0, 0, window, reinterpret_cast<HMENU>(kIdCheckUpdates), nullptr, nullptr);
+      SendMessageW(gCheckUpdatesBtn, WM_SETFONT, reinterpret_cast<WPARAM>(gFontRegular), TRUE);
+
       // Plugins ListView
       gDllList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL,
@@ -645,6 +838,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
       loadSettings();
       requestAutoInject();
+      startUpdateCheck(window, false);
       SetTimer(window, kAutoInjectTimer, kAutoInjectPollMs, nullptr);
       return 0;
     }
@@ -774,6 +968,31 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
       std::unique_ptr<std::wstring> msg(reinterpret_cast<std::wstring*>(wParam));
       if (msg) {
         setStatus(*msg);
+      }
+      return 0;
+    }
+
+    case WM_UPDATE_CHECK_COMPLETE: {
+      std::unique_ptr<UpdateCheckResult> result(reinterpret_cast<UpdateCheckResult*>(wParam));
+      gUpdateCheckInProgress = false;
+      if (!result) return 0;
+      if (result->ok && result->updateAvailable) {
+        setStatus(result->message);
+        const std::wstring prompt = L"SkyLoader " + result->latestVersion +
+          L" is available.\n\nOpen the GitHub release page?";
+        if (MessageBoxW(window, prompt.c_str(), L"Update Available",
+                        MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+          ShellExecuteW(window, L"open",
+                        result->releaseUrl.empty() ? kReleasePageUrl : result->releaseUrl.c_str(),
+                        nullptr, nullptr, SW_SHOWNORMAL);
+        }
+      } else if (result->manual) {
+        const std::wstring text = result->message.empty()
+          ? L"Could not check for updates."
+          : result->message;
+        setStatus(text);
+        MessageBoxW(window, text.c_str(), L"SkyLoader Updates",
+                    result->ok ? MB_ICONINFORMATION : MB_ICONWARNING);
       }
       return 0;
     }
@@ -942,6 +1161,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
           }
           return 0;
         }
+        case kIdCheckUpdates:
+          startUpdateCheck(window, true);
+          return 0;
         case kIdRemoveDll: {
           const int selected = ListView_GetNextItem(gDllList, -1, LVNI_SELECTED);
           if (selected < 0 || static_cast<size_t>(selected) >= gPlugins.size()) {
@@ -1036,7 +1258,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
   if (!windowClass.hIconSm) windowClass.hIconSm = windowClass.hIcon;
   if (!RegisterClassExW(&windowClass)) return 1;
 
-  HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"SkyLoader (v0.0.4)",
+  HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"SkyLoader (v0.0.5)",
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 780, 540,
                                 nullptr, nullptr, instance, nullptr);

@@ -29,7 +29,8 @@ Sky.exe
 ## Build
 
 ```powershell
-cd D:\Develop\Language\C++\SkyLoader
+git clone https://github.com/HerokeyVN/SkyLoader.git
+cd /SkyLoader
 mingw32-make clean
 mingw32-make all
 ```

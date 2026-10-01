@@ -83,6 +83,31 @@ SkyPluginInit(const SkyBootstrapApi*)
 
 `SkyPluginShutdown()` is optional.
 
+## Plugin update metadata
+
+SkyLoader identifies managed plugins by a stable `SkyPluginId` in the DLL's
+Windows `VERSIONINFO` resource, not by its filename. This lets a new build such
+as `my-mod-1.4.dll` automatically replace an installed `release.dll` when both
+declare the same ID.
+
+Add these string values to the plugin's version resource:
+
+```rc
+VALUE "SkyPluginId", "example.author.my-mod\0"
+VALUE "ProductVersion", "1.4.0\0"
+```
+
+`SkyPluginId` is case-insensitive and may contain letters, numbers, `.`, `_`,
+and `-`. It is the permanent package identity: never change it between
+releases. SkyLoader reads this resource directly from disk and never loads a
+DLL while importing it. A matching ID with an equal or newer version replaces
+the managed entry automatically and removes the previous managed DLL after the
+new copy succeeds. A lower version is not installed automatically. DLLs without
+this metadata retain the legacy filename-based replace prompt.
+
+See [Creating a SkyLoader plugin](docs/creating-a-plugin.md) for a complete
+DLL, resource, build, import, and update example.
+
 ---
 
 ## Logs

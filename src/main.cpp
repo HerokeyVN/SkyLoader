@@ -5,6 +5,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <uxtheme.h>
+#include <winver.h>
 #include <winhttp.h>
 
 #include <algorithm>
@@ -41,6 +42,13 @@ constexpr UINT kAutoInjectPollMs = 50;
 struct PluginItem {
   std::wstring path;
   bool enabled{true};
+};
+
+struct PluginMetadata {
+  std::wstring id;
+  std::wstring version;
+  std::wstring name;
+  std::wstring author;
 };
 
 HWND gMainWindow = nullptr;
@@ -109,7 +117,84 @@ std::wstring fileNameOnly(const std::wstring& path) {
   return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
+int compareVersions(std::wstring first, std::wstring second);
+
+std::wstring canonicalPluginId(std::wstring value) {
+  if (value.empty() || value.size() > 128) return L"";
+  for (wchar_t& character : value) {
+    if (!((character >= L'a' && character <= L'z') ||
+          (character >= L'A' && character <= L'Z') ||
+          (character >= L'0' && character <= L'9') ||
+          character == L'.' || character == L'_' || character == L'-'))
+      return L"";
+    character = static_cast<wchar_t>(towlower(character));
+  }
+  return value;
+}
+
+std::wstring versionString(const std::vector<BYTE>& data, WORD language,
+                           WORD codePage, const wchar_t* key) {
+  wchar_t query[128]{};
+  swprintf(query, sizeof(query) / sizeof(query[0]),
+           L"\\StringFileInfo\\%04x%04x\\%ls", language, codePage, key);
+  LPWSTR value = nullptr;
+  UINT length = 0;
+  if (!VerQueryValueW(data.data(), query, reinterpret_cast<LPVOID*>(&value), &length) ||
+      !value || !length)
+    return L"";
+  std::wstring result(value, length);
+  const size_t terminator = result.find(L'\0');
+  if (terminator != std::wstring::npos) result.resize(terminator);
+  return result;
+}
+
+// Read PE VERSIONINFO directly from disk. Importing an arbitrary DLL must not
+// LoadLibrary it merely to discover an identity.
+bool readPluginMetadata(const std::wstring& path, PluginMetadata& metadata) {
+  metadata = {};
+  DWORD ignored = 0;
+  const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+  if (!size) return false;
+  std::vector<BYTE> data(size);
+  if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data())) return false;
+
+  struct Translation { WORD language; WORD codePage; };
+  Translation* translations = nullptr;
+  UINT translationBytes = 0;
+  if (!VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation",
+                      reinterpret_cast<LPVOID*>(&translations), &translationBytes) ||
+      !translations || translationBytes < sizeof(Translation))
+    return false;
+
+  const size_t translationCount = translationBytes / sizeof(Translation);
+  for (size_t index = 0; index != translationCount; ++index) {
+    const std::wstring id = canonicalPluginId(
+      versionString(data, translations[index].language, translations[index].codePage,
+                    L"SkyPluginId"));
+    if (id.empty()) continue;
+    std::wstring version = versionString(data, translations[index].language,
+                                         translations[index].codePage,
+                                         L"ProductVersion");
+    if (version.empty())
+      version = versionString(data, translations[index].language,
+                              translations[index].codePage, L"FileVersion");
+    if (version.empty()) continue;
+    metadata = {
+      id,
+      version,
+      versionString(data, translations[index].language, translations[index].codePage,
+                    L"ProductName"),
+      versionString(data, translations[index].language, translations[index].codePage,
+                    L"CompanyName"),
+    };
+    return true;
+  }
+  return false;
+}
+
 std::wstring pluginIdentity(const std::wstring& path) {
+  PluginMetadata metadata;
+  if (readPluginMetadata(path, metadata)) return L"metadata:" + metadata.id;
   std::wstring filename = fileNameOnly(path);
   const size_t dot = filename.find_last_of(L'.');
   if (dot == std::wstring::npos) return filename;
@@ -165,6 +250,79 @@ bool isManagedPluginPath(const std::wstring& path) {
                            directory.c_str(), static_cast<int>(directory.size()), TRUE) != CSTR_EQUAL)
     return false;
   return path[directory.size()] == L'\\' || path[directory.size()] == L'/';
+}
+
+enum class PluginImportAction { Failed, Unchanged, Added, Updated };
+
+PluginImportAction importAndRegisterPlugin(HWND owner, const std::wstring& source,
+                                           std::wstring& message) {
+  PluginMetadata incomingMetadata;
+  const bool hasIncomingMetadata = readPluginMetadata(source, incomingMetadata);
+  const std::wstring identity = pluginIdentity(source);
+  bool replacing = false;
+  bool metadataReplacement = false;
+
+  for (const auto& registered : gPlugins) {
+    if (CompareStringOrdinal(pluginIdentity(registered.path).c_str(), -1,
+                             identity.c_str(), -1, TRUE) != CSTR_EQUAL)
+      continue;
+    replacing = true;
+    PluginMetadata installedMetadata;
+    if (hasIncomingMetadata && readPluginMetadata(registered.path, installedMetadata) &&
+        installedMetadata.id == incomingMetadata.id) {
+      metadataReplacement = true;
+      if (compareVersions(incomingMetadata.version, installedMetadata.version) < 0) {
+        message = L"A newer " + incomingMetadata.id + L" version (" +
+                  installedMetadata.version + L") is already installed.";
+        return PluginImportAction::Unchanged;
+      }
+    }
+  }
+
+  if (replacing && !metadataReplacement &&
+      MessageBoxW(owner, L"A plugin with this name is already imported. Replace it?",
+                  L"Update Plugin", MB_YESNO | MB_ICONQUESTION) != IDYES) {
+    message = L"Plugin import cancelled.";
+    return PluginImportAction::Unchanged;
+  }
+
+  std::wstring importedPath;
+  std::wstring importError;
+  if (!importPlugin(source, importedPath, importError)) {
+    message = importError;
+    return PluginImportAction::Failed;
+  }
+
+  std::vector<PluginItem> updatedPaths;
+  bool replacedEntry = false;
+  bool staleFileLeft = false;
+  for (const auto& registered : gPlugins) {
+    const bool samePlugin = CompareStringOrdinal(pluginIdentity(registered.path).c_str(), -1,
+                                                   identity.c_str(), -1, TRUE) == CSTR_EQUAL;
+    if (!samePlugin) {
+      updatedPaths.push_back(registered);
+      continue;
+    }
+    if (!replacedEntry) {
+      updatedPaths.push_back({importedPath, registered.enabled});
+      replacedEntry = true;
+    }
+    if (isManagedPluginPath(registered.path) && !samePath(registered.path, importedPath) &&
+        !DeleteFileW(registered.path.c_str()))
+      staleFileLeft = true;
+  }
+  if (!replacedEntry) updatedPaths.push_back({importedPath, true});
+  gPlugins = std::move(updatedPaths);
+
+  if (!replacing) {
+    message = L"Plugin imported into managed directory.";
+    return PluginImportAction::Added;
+  }
+  message = metadataReplacement
+    ? L"Plugin updated from manifest: " + incomingMetadata.id + L" " + incomingMetadata.version + L"."
+    : L"Plugin updated.";
+  if (staleFileLeft) message += L" The old managed DLL could not be deleted.";
+  return PluginImportAction::Updated;
 }
 
 void setStatus(const std::wstring& text) {
@@ -557,15 +715,22 @@ void populateDllList() {
   gIgnoreItemChanged = true;
   ListView_DeleteAllItems(gDllList);
   for (size_t i = 0; i < gPlugins.size(); ++i) {
+    PluginMetadata metadata;
+    const bool hasMetadata = readPluginMetadata(gPlugins[i].path, metadata);
+    const std::wstring displayName = hasMetadata && !metadata.name.empty()
+      ? metadata.name : fileNameOnly(gPlugins[i].path);
+    const std::wstring displayVersion = hasMetadata ? metadata.version : L"—";
+    const std::wstring displayAuthor = hasMetadata && !metadata.author.empty()
+      ? metadata.author : L"—";
     LVITEMW item{};
     item.mask = LVIF_TEXT;
     item.iItem = static_cast<int>(i);
-    const std::wstring displayName = fileNameOnly(gPlugins[i].path);
     item.pszText = const_cast<wchar_t*>(displayName.c_str());
     ListView_InsertItem(gDllList, &item);
-
-    const wchar_t* statusText = gPlugins[i].enabled ? L"Enabled" : L"Disabled";
-    ListView_SetItemText(gDllList, static_cast<int>(i), 1, const_cast<wchar_t*>(statusText));
+    ListView_SetItemText(gDllList, static_cast<int>(i), 1,
+                         const_cast<wchar_t*>(displayVersion.c_str()));
+    ListView_SetItemText(gDllList, static_cast<int>(i), 2,
+                         const_cast<wchar_t*>(displayAuthor.c_str()));
 
     ListView_SetCheckState(gDllList, static_cast<int>(i), gPlugins[i].enabled ? TRUE : FALSE);
   }
@@ -919,10 +1084,12 @@ void layout(HWND window) {
 
   // Resize columns
   const int listWidth = width - margin * 2;
-  const int statusColW = 100;
-  const int nameColW = (std::max)(100, listWidth - statusColW - 25);
+  const int versionColW = 110;
+  const int authorColW = 170;
+  const int nameColW = (std::max)(120, listWidth - versionColW - authorColW - 25);
   ListView_SetColumnWidth(gDllList, 0, nameColW);
-  ListView_SetColumnWidth(gDllList, 1, statusColW);
+  ListView_SetColumnWidth(gDllList, 1, versionColW);
+  ListView_SetColumnWidth(gDllList, 2, authorColW);
 
   // Hint text
   MoveWindow(gHintText, margin, listTop + listHeight + 6, width - margin * 2, 18, TRUE);
@@ -1014,9 +1181,15 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 
       LVCOLUMNW col1{};
       col1.mask = LVCF_TEXT | LVCF_WIDTH;
-      col1.pszText = const_cast<wchar_t*>(L"Status");
-      col1.cx = 100;
+      col1.pszText = const_cast<wchar_t*>(L"Version");
+      col1.cx = 110;
       ListView_InsertColumn(gDllList, 1, &col1);
+
+      LVCOLUMNW col2{};
+      col2.mask = LVCF_TEXT | LVCF_WIDTH;
+      col2.pszText = const_cast<wchar_t*>(L"Author");
+      col2.cx = 170;
+      ListView_InsertColumn(gDllList, 2, &col2);
 
       // Drag and drop hint
       gHintText = CreateWindowW(L"STATIC", L"Tip: You can drag and drop .dll files directly into this window.",
@@ -1269,17 +1442,12 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
           const std::wstring path = normalizedPath(filePath);
           if (path.size() >= 4 &&
               CompareStringOrdinal(path.c_str() + path.size() - 4, -1, L".dll", -1, TRUE) == CSTR_EQUAL) {
-            std::wstring importedPath;
-            std::wstring importError;
-            if (importPlugin(path, importedPath, importError)) {
-              auto it = std::find_if(gPlugins.begin(), gPlugins.end(), [&](const PluginItem& item) {
-                return samePath(item.path, importedPath);
-              });
-              if (it == gPlugins.end()) {
-                gPlugins.push_back({importedPath, true});
-                anyAdded = true;
-              }
-            }
+            std::wstring importMessage;
+            const PluginImportAction action = importAndRegisterPlugin(window, path, importMessage);
+            if (action == PluginImportAction::Added || action == PluginImportAction::Updated)
+              anyAdded = true;
+            else if (action == PluginImportAction::Failed)
+              setStatus(importMessage);
           }
         }
       }
@@ -1329,46 +1497,13 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         case kIdAddDll: {
           std::wstring path;
           if (chooseFile(window, L"Dynamic-link libraries (*.dll)\0*.dll\0\0", path)) {
-            const std::wstring identity = pluginIdentity(path);
-            bool replacing = false;
-            for (const auto& registered : gPlugins) {
-              if (CompareStringOrdinal(pluginIdentity(registered.path).c_str(), -1,
-                                       identity.c_str(), -1, TRUE) == CSTR_EQUAL) {
-                replacing = true;
-                break;
-              }
+            std::wstring importMessage;
+            const PluginImportAction action = importAndRegisterPlugin(window, path, importMessage);
+            if (action == PluginImportAction::Added || action == PluginImportAction::Updated) {
+              populateDllList();
+              saveSettings();
             }
-            if (replacing && MessageBoxW(window,
-                L"A plugin with this name is already imported. Replace it?",
-                L"Update Plugin", MB_YESNO | MB_ICONQUESTION) != IDYES)
-              return 0;
-            std::wstring importedPath;
-            std::wstring importError;
-            if (!importPlugin(path, importedPath, importError)) {
-              setStatus(importError);
-              return 0;
-            }
-            std::vector<PluginItem> updatedPaths;
-            bool replacedEntry = false;
-            for (const auto& registered : gPlugins) {
-              const bool samePlugin = CompareStringOrdinal(pluginIdentity(registered.path).c_str(), -1,
-                                                           identity.c_str(), -1, TRUE) == CSTR_EQUAL;
-              if (!samePlugin) {
-                updatedPaths.push_back(registered);
-                continue;
-              }
-              if (!replacedEntry) {
-                updatedPaths.push_back({importedPath, registered.enabled});
-                replacedEntry = true;
-              } else if (isManagedPluginPath(registered.path) && !samePath(registered.path, importedPath)) {
-                DeleteFileW(registered.path.c_str());
-              }
-            }
-            if (!replacedEntry) updatedPaths.push_back({importedPath, true});
-            gPlugins = std::move(updatedPaths);
-            populateDllList();
-            saveSettings();
-            setStatus(replacing ? L"Plugin updated." : L"Plugin imported into managed directory.");
+            setStatus(importMessage);
           }
           return 0;
         }

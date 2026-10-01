@@ -94,7 +94,7 @@ Add these string values to the plugin's version resource:
 
 ```rc
 VALUE "SkyPluginId", "example.author.my-mod\0"
-VALUE "ProductVersion", "1.4.0\0"
+VALUE "Version", "1.4.0\0"
 ```
 
 `SkyPluginId` is case-insensitive and may contain letters, numbers, `.`, `_`,
@@ -104,6 +104,11 @@ DLL while importing it. A matching ID with an equal or newer version replaces
 the managed entry automatically and removes the previous managed DLL after the
 new copy succeeds. A lower version is not installed automatically. DLLs without
 this metadata retain the legacy filename-based replace prompt.
+
+The display fields are `PluginName`, `Version`, `Author`, and `Description`.
+SkyLoader continues to read the older Windows names (`ProductName`,
+`ProductVersion`, `CompanyName`, and `FileDescription`) as a compatibility
+fallback.
 
 See [Creating a SkyLoader plugin](docs/creating-a-plugin.md) for a complete
 DLL, resource, build, import, and update example.

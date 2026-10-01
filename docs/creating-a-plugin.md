@@ -57,12 +57,11 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "CompanyName", "Example Author\0"
-      VALUE "FileDescription", "Example SkyLoader plugin\0"
-      VALUE "FileVersion", "1.0.0\0"
-      VALUE "ProductName", "Example Plugin\0"
-      VALUE "ProductVersion", "1.0.0\0"
+      VALUE "Author", "Example Author\0"
+      VALUE "Description", "Example SkyLoader plugin\0"
+      VALUE "PluginName", "Example Plugin\0"
       VALUE "SkyPluginId", "example.author.example-plugin\0"
+      VALUE "Version", "1.0.0\0"
     END
   END
   BLOCK "VarFileInfo"
@@ -74,9 +73,11 @@ END
 
 `SkyPluginId` is the package identity, not the display name. It is
 case-insensitive and may contain only letters, digits, `.`, `_`, and `-`. Pick
-one once and never change it. `ProductName`, `ProductVersion`, and
-`CompanyName` are what SkyLoader displays in its `Plugin`, `Version`, and
-`Author` columns.
+one once and never change it. `PluginName`, `Version`, `Author`, and
+`Description` are what SkyLoader displays in its `Plugin`, `Version`,
+`Author`, and `Description` columns. SkyLoader still accepts the older Windows
+field names (`ProductName`, `ProductVersion`, `CompanyName`, and
+`FileDescription`) for compatibility, but new plugins should use this schema.
 
 ## 3. Build
 
@@ -120,8 +121,8 @@ matching and show their filename with `—` for version and author.
 
 ## 5. Test checklist
 
-1. Import the plugin and verify `ProductName`, `ProductVersion`, and
-   `CompanyName` appear in SkyLoader.
+1. Import the plugin and verify `PluginName`, `Version`, `Author`, and
+   `Description` appear in SkyLoader.
 2. Launch Sky and inspect `SkyBootstrap.log` for the initialization message.
 3. Build a new DLL with the same `SkyPluginId`, a higher version, and a
    different filename; import it and verify one list entry remains.

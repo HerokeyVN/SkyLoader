@@ -23,9 +23,13 @@ _Avoid_: source DLL, registered path
 ## Plugin presentation
 
 **Plugin name**:
-The human-readable `ProductName` shown in SkyLoader's plugin list.
+The human-readable `PluginName` shown in SkyLoader's plugin list.
 _Avoid_: plugin identity, filename
 
 **Plugin author**:
-The human-readable `CompanyName` shown in SkyLoader's plugin list.
+The human-readable `Author` shown in SkyLoader's plugin list.
 _Avoid_: plugin identity, publisher key
+
+**Plugin description**:
+The human-readable `Description` shown in SkyLoader's plugin list.
+_Avoid_: file description, plugin identity

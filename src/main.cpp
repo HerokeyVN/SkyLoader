@@ -33,7 +33,7 @@ constexpr int kIdRemoveDll = 1007;
 constexpr int kIdStatus = 1008;
 constexpr int kIdCheckUpdates = 1009;
 
-constexpr wchar_t kAppVersion[] = L"0.1.0";
+constexpr wchar_t kAppVersion[] = L"0.1.1";
 constexpr wchar_t kReleasePageUrl[] = L"https://github.com/HerokeyVN/SkyLoader/releases";
 constexpr wchar_t kSkySteamUri[] = L"steam://run/2325290";
 constexpr UINT_PTR kAutoInjectTimer = 1;
@@ -49,6 +49,7 @@ struct PluginMetadata {
   std::wstring version;
   std::wstring name;
   std::wstring author;
+  std::wstring description;
 };
 
 HWND gMainWindow = nullptr;
@@ -148,6 +149,13 @@ std::wstring versionString(const std::vector<BYTE>& data, WORD language,
   return result;
 }
 
+std::wstring versionStringWithFallback(const std::vector<BYTE>& data, WORD language,
+                                       WORD codePage, const wchar_t* primary,
+                                       const wchar_t* legacy) {
+  std::wstring result = versionString(data, language, codePage, primary);
+  return result.empty() ? versionString(data, language, codePage, legacy) : result;
+}
+
 // Read PE VERSIONINFO directly from disk. Importing an arbitrary DLL must not
 // LoadLibrary it merely to discover an identity.
 bool readPluginMetadata(const std::wstring& path, PluginMetadata& metadata) {
@@ -172,9 +180,9 @@ bool readPluginMetadata(const std::wstring& path, PluginMetadata& metadata) {
       versionString(data, translations[index].language, translations[index].codePage,
                     L"SkyPluginId"));
     if (id.empty()) continue;
-    std::wstring version = versionString(data, translations[index].language,
-                                         translations[index].codePage,
-                                         L"ProductVersion");
+    std::wstring version = versionStringWithFallback(
+      data, translations[index].language, translations[index].codePage,
+      L"Version", L"ProductVersion");
     if (version.empty())
       version = versionString(data, translations[index].language,
                               translations[index].codePage, L"FileVersion");
@@ -182,10 +190,15 @@ bool readPluginMetadata(const std::wstring& path, PluginMetadata& metadata) {
     metadata = {
       id,
       version,
-      versionString(data, translations[index].language, translations[index].codePage,
-                    L"ProductName"),
-      versionString(data, translations[index].language, translations[index].codePage,
-                    L"CompanyName"),
+      versionStringWithFallback(data, translations[index].language,
+                                translations[index].codePage,
+                                L"PluginName", L"ProductName"),
+      versionStringWithFallback(data, translations[index].language,
+                                translations[index].codePage,
+                                L"Author", L"CompanyName"),
+      versionStringWithFallback(data, translations[index].language,
+                                translations[index].codePage,
+                                L"Description", L"FileDescription"),
     };
     return true;
   }
@@ -722,6 +735,8 @@ void populateDllList() {
     const std::wstring displayVersion = hasMetadata ? metadata.version : L"—";
     const std::wstring displayAuthor = hasMetadata && !metadata.author.empty()
       ? metadata.author : L"—";
+    const std::wstring displayDescription = hasMetadata && !metadata.description.empty()
+      ? metadata.description : L"—";
     LVITEMW item{};
     item.mask = LVIF_TEXT;
     item.iItem = static_cast<int>(i);
@@ -731,6 +746,8 @@ void populateDllList() {
                          const_cast<wchar_t*>(displayVersion.c_str()));
     ListView_SetItemText(gDllList, static_cast<int>(i), 2,
                          const_cast<wchar_t*>(displayAuthor.c_str()));
+    ListView_SetItemText(gDllList, static_cast<int>(i), 3,
+                         const_cast<wchar_t*>(displayDescription.c_str()));
 
     ListView_SetCheckState(gDllList, static_cast<int>(i), gPlugins[i].enabled ? TRUE : FALSE);
   }
@@ -1085,11 +1102,13 @@ void layout(HWND window) {
   // Resize columns
   const int listWidth = width - margin * 2;
   const int versionColW = 110;
-  const int authorColW = 170;
-  const int nameColW = (std::max)(120, listWidth - versionColW - authorColW - 25);
+  const int authorColW = 150;
+  const int descriptionColW = 230;
+  const int nameColW = (std::max)(120, listWidth - versionColW - authorColW - descriptionColW - 25);
   ListView_SetColumnWidth(gDllList, 0, nameColW);
   ListView_SetColumnWidth(gDllList, 1, versionColW);
   ListView_SetColumnWidth(gDllList, 2, authorColW);
+  ListView_SetColumnWidth(gDllList, 3, descriptionColW);
 
   // Hint text
   MoveWindow(gHintText, margin, listTop + listHeight + 6, width - margin * 2, 18, TRUE);
@@ -1188,8 +1207,14 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
       LVCOLUMNW col2{};
       col2.mask = LVCF_TEXT | LVCF_WIDTH;
       col2.pszText = const_cast<wchar_t*>(L"Author");
-      col2.cx = 170;
+      col2.cx = 150;
       ListView_InsertColumn(gDllList, 2, &col2);
+
+      LVCOLUMNW col3{};
+      col3.mask = LVCF_TEXT | LVCF_WIDTH;
+      col3.pszText = const_cast<wchar_t*>(L"Description");
+      col3.cx = 230;
+      ListView_InsertColumn(gDllList, 3, &col3);
 
       // Drag and drop hint
       gHintText = CreateWindowW(L"STATIC", L"Tip: You can drag and drop .dll files directly into this window.",

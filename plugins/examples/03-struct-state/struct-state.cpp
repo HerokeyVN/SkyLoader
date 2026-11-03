@@ -188,12 +188,11 @@ const Value* resolveRead(const Value& doc,
   for (const std::string& component : components) {
     const std::string where = "path segment '" + component + "'";
     if (cursor->isObject()) {
-      const Value& next = cursor->at(component);
-      if (next.isNull()) {
+      if (!cursor->contains(component)) {
         if (error != nullptr) *error = where + " names a missing key.";
         return nullptr;
       }
-      cursor = &next;
+      cursor = &cursor->at(component);
       continue;
     }
     if (cursor->isArray()) {
@@ -309,29 +308,22 @@ void handleRequest(const Value& request, Value& response) {
           "The 'patch' action needs a \"fields\" object of dot path to value.");
       return;
     }
-    // Phase 1: validate every path before touching the document. All-or-nothing.
-    for (const auto& change : fields.members) {
-      std::vector<std::string> components;
-      if (!splitPath(change.first, &components, &error) ||
-          resolveParent(&g_doc, components, &error) == nullptr) {
-        response = skyplugin::errorReply("INVALID_PATH", error);
-        return;
-      }
-    }
-    // Phase 2: apply every change through the same leaf rules as set-path.
+    // Validate and mutate a draft; publish only when every leaf succeeds.
+    Value draft = g_doc;
     for (const auto& change : fields.members) {
       std::vector<std::string> components;
       if (!splitPath(change.first, &components, &error)) {
         response = skyplugin::errorReply("INVALID_PATH", error);
         return;
       }
-      Value* parent = resolveParent(&g_doc, components, &error);
+      Value* parent = resolveParent(&draft, components, &error);
       if (parent == nullptr ||
           !writeLeaf(parent, components.back(), change.second, &error)) {
         response = skyplugin::errorReply("INVALID_PATH", error);
         return;
       }
     }
+    g_doc = std::move(draft);
     response = skyplugin::okReply(g_doc);
     return;
   }
@@ -373,7 +365,7 @@ void handleRequest(const Value& request, Value& response) {
       return;
     }
     const Value& indexValue = request.at("index");
-    if (!indexValue.isNumber() ||
+    if (!indexValue.isNumber() || !std::isfinite(indexValue.number) ||
         indexValue.number != std::floor(indexValue.number)) {
       response = skyplugin::errorReply(
           "INVALID_TYPE", "The \"index\" parameter must be a whole number.");
@@ -383,7 +375,7 @@ void handleRequest(const Value& request, Value& response) {
         indexValue.number >= static_cast<double>(schedule->items.size())) {
       response = skyplugin::errorReply(
           "NOT_FOUND",
-          "Index " + std::to_string(static_cast<long long>(indexValue.number)) +
+          "Index " + std::to_string(indexValue.number) +
               " is outside the schedule of " +
               std::to_string(schedule->items.size()) + " items.");
       return;

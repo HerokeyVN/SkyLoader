@@ -42,7 +42,7 @@ bool sortOrderValid(const Value& order, std::string* reason) {
   for (const char* candidate : kSortOrders) {
     if (order.string == candidate) return true;
   }
-  *reason = "must be one of: asc, desc, reverse";
+  if (reason != nullptr) *reason = "must be one of: asc, desc, reverse";
   return false;
 }
 
@@ -102,10 +102,10 @@ bool indexOfField(const Value& request, const char* key, size_t* index,
     return false;
   }
   const double raw = value.number;
-  if (raw != std::floor(raw) || raw < 0 ||
-      raw > static_cast<double>(g_items.size())) {
+  if (!std::isfinite(raw) || raw != std::floor(raw) || raw < 0 ||
+      raw >= static_cast<double>(g_items.size())) {
     reportError("NOT_FOUND",
-                "Index " + std::to_string(static_cast<long long>(raw)) +
+                "Index " + std::to_string(raw) +
                     " is outside the list of " +
                     std::to_string(g_items.size()) + " items.");
     return false;

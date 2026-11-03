@@ -510,7 +510,7 @@ inline bool parseNumber(std::string_view text, size_t* offset, Value* out,
   buffer[length] = '\0';
   char* end = nullptr;
   const double value = std::strtod(buffer, &end);
-  if (end != buffer + length) {
+  if (end != buffer + length || !std::isfinite(value)) {
     *error = "invalid number";
     return false;
   }

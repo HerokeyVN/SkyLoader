@@ -7,6 +7,39 @@ import (
 	"testing"
 )
 
+func TestWriteAtomicReplacesExistingFile(t *testing.T) {
+	root := t.TempDir()
+	destination := filepath.Join(root, "config.json")
+	for _, value := range []string{"first", "second", "third"} {
+		if err := writeAtomic(".config-*", destination, []byte(value)); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(destination)
+		if err != nil || string(data) != value {
+			t.Fatalf("saved config = %q, %v; want %q", data, err, value)
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("temporary files left behind: %v, %v", entries, err)
+	}
+}
+
+func TestWriteAtomicFailureCleansTemporaryFile(t *testing.T) {
+	root := t.TempDir()
+	destination := filepath.Join(root, "config.json")
+	if err := os.Mkdir(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(".config-*", destination, []byte("new")); err == nil {
+		t.Fatal("expected replacing a directory to fail")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("destination changed or temporary file leaked: %v, %v", entries, err)
+	}
+}
+
 func TestIsHTTPURL(t *testing.T) {
 	for _, value := range []string{
 		"http://example.com", "https://example.com/a?b=c", "HTTPS://EXAMPLE.COM", "Http://x",

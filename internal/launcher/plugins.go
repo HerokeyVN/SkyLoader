@@ -137,13 +137,12 @@ func scanBundles(root string) []*pluginRecord {
 
 // --- importing -----------------------------------------------------------
 //
-// importPlugin installs a DLL, a zip bundle, or an unpacked bundle directory
-// into the managed store. Missing destinations are added as-is; existing ones
-// go through the conflict policy and are replaced by renaming the staged copy
-// into place after the old directory is parked in a sibling .old- directory
-// (locked files on Windows cannot be deleted in place, but an empty directory
-// can be renamed).
+// importPlugin stages and validates an input before installing it offline.
 func importPlugin(root, input string, force bool) Result {
+	return importWithCommit(root, input, force, installStagedFiles)
+}
+
+func importWithCommit(root, input string, force bool, commit func(string, string, *pluginRecord) error) Result {
 	input, err := filepath.Abs(input)
 	if err != nil {
 		return importError(err)
@@ -157,12 +156,7 @@ func importPlugin(root, input string, force bool) Result {
 	if err != nil {
 		return importError(err)
 	}
-	keepStage := false
-	defer func() {
-		if !keepStage {
-			_ = os.RemoveAll(stage)
-		}
-	}()
+	defer os.RemoveAll(stage)
 
 	if err := stageSource(input, stage, info); err != nil {
 		return importError(err)
@@ -172,16 +166,22 @@ func importPlugin(root, input string, force bool) Result {
 		return importError(err)
 	}
 
-	// keepStage reports that the stage moved into place and must not be
-	// removed by the deferred cleanup.
-	var result Result
 	destination := filepath.Join(root, DirectoryName(bundle.ID))
-	if _, err := os.Stat(destination); err != nil {
-		result, keepStage = adoptBundleStage(stage, destination, bundle)
-	} else {
-		result, keepStage = replaceBundle(root, stage, destination, bundle, force)
+	action := ActionAdded
+	if _, err := os.Stat(destination); err == nil {
+		action = ActionUpdated
+		if existing, err := loadBundle(destination); err == nil && !force {
+			if declined, ok := conflictPolicy(existing, bundle); ok {
+				return declined
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return importError(err)
 	}
-	return result
+	if err := commit(stage, destination, bundle); err != nil {
+		return pluginResult(ActionFailed, bundle, err.Error())
+	}
+	return pluginResult(action, bundle, "Plugin installed.")
 }
 
 // errUnsupportedPlugin rejects inputs that are neither a directory, a zip
@@ -266,38 +266,25 @@ func stageDLL(source, stage string) error {
 	return os.WriteFile(filepath.Join(stage, ManifestName), data, 0o644)
 }
 
-// adoptBundleStage moves a never-before-installed bundle into the store.
-func adoptBundleStage(stage, destination string, bundle *pluginRecord) (Result, bool) {
-	if err := os.Rename(stage, destination); err != nil {
-		return Result{Action: ActionFailed, ID: bundle.ID, Message: err.Error()}, false
-	}
-	return pluginResult(ActionAdded, bundle, "Plugin added."), true
-}
-
-// replaceBundle reconciles a staged import with what is already installed.
-// The conflict policy may decline the file; otherwise the old directory is
-// parked aside and the staged copy takes its place.
-func replaceBundle(root, stage, destination string, bundle *pluginRecord, force bool) (Result, bool) {
-	existing, loadErr := loadBundle(destination)
-	if loadErr == nil && !force {
-		if declined, ok := conflictPolicy(existing, bundle); ok {
-			return declined, false
+// installStagedFiles is the offline installer used without a running launcher.
+func installStagedFiles(stage, destination string, bundle *pluginRecord) error {
+	backup := ""
+	if _, err := os.Stat(destination); err == nil {
+		backup = filepath.Join(filepath.Dir(destination), ".old-"+randomSuffix())
+		if err := os.Rename(destination, backup); err != nil {
+			return err
 		}
 	}
-
-	old := filepath.Join(root, ".old-"+randomSuffix())
-	if err := os.Rename(destination, old); err != nil {
-		return Result{
-			Action: ActionFailed, ID: bundle.ID,
-			Message: "The installed plugin is in use. Close Sky and try again.",
-		}, false
-	}
 	if err := os.Rename(stage, destination); err != nil {
-		_ = os.Rename(old, destination)
-		return Result{Action: ActionFailed, ID: bundle.ID, Message: err.Error()}, false
+		if backup != "" {
+			return errors.Join(err, os.Rename(backup, destination))
+		}
+		return err
 	}
-	_ = os.RemoveAll(old)
-	return pluginResult(ActionUpdated, bundle, "Plugin updated."), true
+	if backup != "" {
+		return os.RemoveAll(backup)
+	}
+	return nil
 }
 
 // conflictPolicy decides whether an import must stop before replacing an
@@ -337,6 +324,9 @@ func importError(err error) Result {
 // managed store. A conflicting bundle is returned as an item with action
 // "conflict"; retry the same call with force=true after confirmation.
 func (l *Launcher) Import(paths []string, force bool) ImportReport {
+	l.injectMu.Lock()
+	defer l.injectMu.Unlock()
+	defer l.refreshAfterChange()
 	report := ImportReport{Paths: append([]string(nil), paths...), Force: force}
 	var tally importTally
 
@@ -345,15 +335,12 @@ func (l *Launcher) Import(paths []string, force bool) ImportReport {
 		if source == "" {
 			continue
 		}
-		result := importPlugin(l.storeRoot, source, force)
+		result := importWithCommit(l.storeRoot, source, force, l.installBundle)
 		report.Items = append(report.Items, ImportItem{
 			Source: source, Action: string(result.Action), ID: result.ID,
 			Name: result.Name, Version: result.Version, Message: result.Message,
 		})
 		tally.count(result.Action)
-		if result.Action == ActionAdded || result.Action == ActionUpdated {
-			l.afterInstall(result, source)
-		}
 	}
 
 	report.Message, report.NeedsConfirm = tally.summarize(len(report.Items))
@@ -404,67 +391,174 @@ func (t *importTally) summarize(itemCount int) (message string, needsConfirm boo
 	return message, needsConfirm
 }
 
-// afterInstall registers the installed bundle, persists it, and — when Sky is
-// already injected with SkyBootstrap — asks the game to load it at once.
-func (l *Launcher) afterInstall(result Result, source string) {
-	bundle, err := loadBundle(filepath.Join(l.storeRoot, DirectoryName(result.ID)))
+// installBundle keeps the old directory until loading and persistence succeed.
+// Import holds injectMu; saveMu prevents other saves from seeing a draft registry.
+func (l *Launcher) installBundle(stage, destination string, incoming *pluginRecord) error {
+	l.saveMu.Lock()
+	defer l.saveMu.Unlock()
+	key := strings.ToLower(incoming.ID)
+	l.mu.RLock()
+	existing := l.plugins[key]
+	oldOrder := slices.Clone(l.order)
+	l.mu.RUnlock()
+	loaded, err := l.loadedForChange(existing)
 	if err != nil {
-		l.logger.Printf("reload imported bundle %s: %v", result.ID, err)
-		return
+		return err
+	}
+	if loaded {
+		if err := l.client.Unload(existing.DLLPath); err != nil {
+			return fmt.Errorf("unload old plugin: %w", err)
+		}
+	}
+	backup := ""
+	if _, err := os.Stat(destination); err == nil {
+		backup = filepath.Join(l.storeRoot, ".old-"+randomSuffix())
+		if err := os.Rename(destination, backup); err != nil {
+			return errors.Join(err, l.restoreLoaded(existing, loaded))
+		}
+	}
+	swapped := false
+	newLoaded := false
+	rollback := func(cause error) error {
+		if newLoaded {
+			if err := l.client.Unload(incoming.DLLPath); err != nil {
+				// Keep the replacement and the backup when its DLL cannot be unloaded.
+				// Restoring files here could orphan a still-running DLL.
+				return errors.Join(cause, fmt.Errorf("rollback unload failed; old bundle retained at %s: %w", backup, err))
+			}
+		}
+		if swapped {
+			if err := os.Rename(destination, stage); err != nil {
+				return errors.Join(cause, fmt.Errorf("rollback replacement: %w", err))
+			}
+		}
+		if backup != "" {
+			if err := os.Rename(backup, destination); err != nil {
+				return errors.Join(cause, fmt.Errorf("restore old bundle: %w", err))
+			}
+		}
+		l.mu.Lock()
+		if existing == nil {
+			delete(l.plugins, key)
+		} else {
+			l.plugins[key] = existing
+		}
+		l.order = oldOrder
+		l.mu.Unlock()
+		return errors.Join(cause, l.restoreLoaded(existing, loaded))
+	}
+	if err := os.Rename(stage, destination); err != nil {
+		return rollback(err)
+	}
+	swapped = true
+	bundle, err := loadBundle(destination)
+	if err != nil {
+		return rollback(err)
 	}
 	bundle.Managed = true
-
-	l.mu.Lock()
-	key := strings.ToLower(bundle.ID)
-	existing := l.plugins[key]
 	if existing != nil {
 		bundle.Enabled = existing.Enabled
 	}
+	incoming.DLLPath = bundle.DLLPath
+	l.mu.RLock()
+	injected := l.injectedLocked()
+	l.mu.RUnlock()
+	if injected && bundle.Enabled {
+		if err := l.client.Load(bundle.DLLPath); err != nil {
+			return rollback(fmt.Errorf("load replacement: %w", err))
+		}
+		newLoaded = true
+	}
+	l.mu.Lock()
 	l.plugins[key] = bundle
 	if existing == nil {
 		l.order = append(l.order, key)
 	}
 	sortPluginOrder(l.order, l.plugins)
-	injected := l.injectedLocked()
 	l.mu.Unlock()
-
-	if err := l.persist(); err != nil {
-		l.setStatus("Plugin installed, but settings could not be saved: " + err.Error())
-		return
+	if err := l.persistLocked(); err != nil {
+		return rollback(err)
 	}
-
-	if injected && bundle.Enabled {
-		if err := l.client.Load(bundle.DLLPath); err != nil {
-			l.setStatus("Plugin installed, but Sky did not load it: " + err.Error())
-		} else {
-			l.setStatus("Plugin installed and loaded into Sky.")
+	if backup != "" {
+		if err := os.RemoveAll(backup); err != nil {
+			l.logger.Printf("cleanup old bundle %s: %v", backup, err)
 		}
-		l.refreshLoaded()
-	} else {
-		l.setStatus("Plugin installed from " + filepath.Base(source) + ".")
 	}
-	l.notify()
+	l.mu.Lock()
+	if existing != nil {
+		delete(l.loaded, strings.ToLower(normalizePath(existing.DLLPath)))
+	}
+	if newLoaded {
+		l.loaded[strings.ToLower(normalizePath(bundle.DLLPath))] = true
+	}
+	l.mu.Unlock()
+	l.setStatus("Plugin installed.")
+	return nil
 }
 
-// SetPluginEnabled toggles a plugin and, when Sky is already injected, applies
-// the change to the running game.
+// loadedForChange checks the host rather than trusting the cached UI state.
+func (l *Launcher) loadedForChange(record *pluginRecord) (bool, error) {
+	l.mu.RLock()
+	injected := l.injectedLocked()
+	l.mu.RUnlock()
+	if record == nil || !injected {
+		return false, nil
+	}
+	paths, err := l.client.List()
+	if err != nil {
+		return false, fmt.Errorf("query loaded plugins: %w", err)
+	}
+	for _, path := range paths {
+		if strings.EqualFold(normalizePath(path), normalizePath(record.DLLPath)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (l *Launcher) restoreLoaded(record *pluginRecord, loaded bool) error {
+	if !loaded {
+		return nil
+	}
+	if err := l.client.Load(record.DLLPath); err != nil {
+		return fmt.Errorf("restore loaded plugin: %w", err)
+	}
+	return nil
+}
+
+func (l *Launcher) refreshAfterChange() {
+	l.mu.RLock()
+	injected := l.injectedLocked()
+	l.mu.RUnlock()
+	if injected {
+		l.refreshLoaded()
+	}
+}
+
+// SetPluginEnabled saves the new state before applying it to the game.
 func (l *Launcher) SetPluginEnabled(id string, enabled bool) error {
+	l.injectMu.Lock()
+	defer l.injectMu.Unlock()
+	l.saveMu.Lock()
+	defer l.saveMu.Unlock()
 	l.mu.Lock()
 	record := l.plugins[strings.ToLower(id)]
 	if record == nil {
 		l.mu.Unlock()
 		return errors.New("plugin was not found")
 	}
+	previous := record.Enabled
 	record.Enabled = enabled
 	dllPath := record.DLLPath
-	injected := l.injectedLocked()
+	injected := l.injectedLocked() && !record.Missing
 	l.mu.Unlock()
-
-	if err := l.persist(); err != nil {
+	if err := l.persistLocked(); err != nil {
+		l.mu.Lock()
+		record.Enabled = previous
+		l.mu.Unlock()
 		l.setStatus("Could not save the plugin setting: " + err.Error())
 		return err
 	}
-
 	if injected {
 		l.applyEnabledToSky(dllPath, enabled)
 	} else {
@@ -474,8 +568,6 @@ func (l *Launcher) SetPluginEnabled(id string, enabled bool) error {
 	return nil
 }
 
-// applyEnabledToSky loads or unloads a plugin in the injected game and reports
-// the outcome.
 func (l *Launcher) applyEnabledToSky(dllPath string, enabled bool) {
 	var pipeErr error
 	if enabled {
@@ -494,61 +586,79 @@ func (l *Launcher) applyEnabledToSky(dllPath string, enabled bool) {
 	l.refreshLoaded()
 }
 
-// RemovePlugin unregisters a plugin. Managed bundles are deleted from the
-// managed store; legacy plugins outside the store are only unregistered.
+// RemovePlugin parks managed files until unregistering has been persisted.
 func (l *Launcher) RemovePlugin(id string) error {
+	l.injectMu.Lock()
+	defer l.injectMu.Unlock()
+	defer l.refreshAfterChange()
+	l.saveMu.Lock()
+	defer l.saveMu.Unlock()
 	key := strings.ToLower(id)
-	l.mu.Lock()
+	l.mu.RLock()
 	record := l.plugins[key]
+	oldOrder := slices.Clone(l.order)
+	l.mu.RUnlock()
 	if record == nil {
-		l.mu.Unlock()
 		return errors.New("plugin was not found")
 	}
-	injected := l.injectedLocked()
-	l.mu.Unlock()
-
-	if injected {
-		_ = l.client.Unload(record.DLLPath)
-	}
-	if err := l.removeManagedBundle(record); err != nil {
+	if err := l.validateManagedBundle(record); err != nil {
 		return err
 	}
-
+	loaded, err := l.loadedForChange(record)
+	if err != nil {
+		return err
+	}
+	if loaded {
+		if err := l.client.Unload(record.DLLPath); err != nil {
+			return fmt.Errorf("unload plugin: %w", err)
+		}
+	}
+	backup := ""
+	if record.Managed {
+		backup = filepath.Join(l.storeRoot, ".old-"+randomSuffix())
+		if err := os.Rename(record.folder(), backup); err != nil {
+			return errors.Join(fmt.Errorf("park plugin files: %w", err), l.restoreLoaded(record, loaded))
+		}
+	}
 	l.mu.Lock()
 	delete(l.plugins, key)
-	delete(l.loaded, strings.ToLower(record.DLLPath))
 	l.order = slices.DeleteFunc(l.order, func(existing string) bool { return existing == key })
 	l.mu.Unlock()
-
-	if err := l.persist(); err != nil {
-		l.setStatus("Plugin removed, but settings could not be saved: " + err.Error())
-		return err
+	if err := l.persistLocked(); err != nil {
+		l.mu.Lock()
+		l.plugins[key] = record
+		l.order = oldOrder
+		l.mu.Unlock()
+		if backup != "" {
+			if restoreErr := os.Rename(backup, record.folder()); restoreErr != nil {
+				return errors.Join(err, fmt.Errorf("restore removed bundle: %w", restoreErr))
+			}
+		}
+		return errors.Join(err, l.restoreLoaded(record, loaded))
 	}
-	if record.Managed {
-		l.setStatus("Plugin and its files were removed.")
-	} else {
-		l.setStatus("Plugin unregistered; its original file was not deleted.")
+	l.mu.Lock()
+	delete(l.loaded, strings.ToLower(normalizePath(record.DLLPath)))
+	l.mu.Unlock()
+	if backup != "" {
+		// A cleanup failure leaves a hidden, unregistered backup for later cleanup.
+		if err := os.RemoveAll(backup); err != nil {
+			l.logger.Printf("cleanup removed bundle %s: %v", backup, err)
+		}
 	}
-	l.refreshLoaded()
+	l.setStatus("Plugin removed.")
+	l.notify()
 	return nil
 }
 
-// removeManagedBundle deletes the directory of a managed bundle. It refuses
-// anything that is not safely within the managed plugin store.
-func (l *Launcher) removeManagedBundle(record *pluginRecord) error {
+// validateManagedBundle refuses paths outside the managed plugin store.
+func (l *Launcher) validateManagedBundle(record *pluginRecord) error {
 	if !record.Managed {
 		return nil
 	}
 	directory := filepath.Clean(record.folder())
-	if directory == l.storeRoot {
-		return errors.New("refusing to delete the managed plugin store itself")
-	}
-	if relative, err := filepath.Rel(l.storeRoot, directory); err != nil ||
-		relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return errors.New("refusing to delete a plugin outside the managed store")
-	}
-	if err := os.RemoveAll(directory); err != nil {
-		return fmt.Errorf("remove plugin files (close Sky and try again): %w", err)
+	relative, err := filepath.Rel(l.storeRoot, directory)
+	if err != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("refusing to remove a plugin outside the managed store or the store itself")
 	}
 	return nil
 }
@@ -738,10 +848,16 @@ func (l *Launcher) loadRegisteredRecords(enabledByPath, managedDLLs map[string]b
 		}
 		if !isRegularFile(path) {
 			l.logger.Printf("registered plugin is missing: %s", path)
-			continue
 		}
 		record := recordForDLL(path)
+		record.Missing = !isRegularFile(path)
 		record.Enabled = entry.Enabled
+		if entry.UIPath != "" {
+			record.UIDir = entry.UIPath
+			if !record.Missing && isRegularFile(filepath.Join(entry.UIPath, "index.html")) {
+				record.UIEntry = "index.html"
+			}
+		}
 		if record.Name == "" {
 			record.Name = DisplayName(path)
 		}

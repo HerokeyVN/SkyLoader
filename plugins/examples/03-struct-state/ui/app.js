@@ -70,7 +70,7 @@ function render() {
 
   const schedule = $("#schedule");
   schedule.textContent = "";
-  const items = doc.schedule ?? [];
+  const items = Array.isArray(doc.schedule) ? doc.schedule : [];
   $("#schedule-stats").textContent = "(" + items.length + " items)";
   if (items.length === 0) {
     const li = document.createElement("li");
@@ -104,9 +104,19 @@ function render() {
 
 async function send(action, params) {
   const data = await request(action, params);
-  // get-path replies describe one leaf; every other action replies with the
-  // authoritative document.
-  if (action !== "get-path" && data && (data.meta || data.profile)) {
+  // Schedule mutations reply with the array; path writes reply with one leaf.
+  // Fetch the full document after a path write to reconcile arbitrary paths.
+  if (action === "schedule-add" || action === "schedule-remove") {
+    if (state.doc && Array.isArray(data)) {
+      state.doc.schedule = data;
+    } else {
+      state.doc = await request("get");
+    }
+    render();
+  } else if (action === "set-path") {
+    state.doc = await request("get");
+    render();
+  } else if (action === "get" || action === "patch") {
     state.doc = data;
     render();
   }

@@ -82,7 +82,10 @@ function numberOf(value) {
 }
 
 function volumeOf(value) {
-  return Math.round(numberOf(value));
+  const number = Number(value);
+  return Number.isFinite(number)
+    ? Math.max(0, Math.min(100, Math.round(number)))
+    : 0;
 }
 
 function readChanges() {

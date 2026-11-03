@@ -4,11 +4,48 @@ package launcher
 
 import (
 	"encoding/json"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestMissingLegacyPluginSurvivesSaveAndRecovery(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	path := filepath.Join(t.TempDir(), "missing.dll")
+	uiPath := filepath.Join(filepath.Dir(path), "ui")
+	l := &Launcher{
+		exeDir: t.TempDir(), storeRoot: t.TempDir(), logger: log.New(io.Discard, "", 0),
+		cfg: Config{Plugins: []PluginEntry{{Path: path, UIPath: uiPath, Enabled: false}}},
+	}
+	l.rebuildRecords()
+	record := l.plugins[FromPath(path)]
+	if record == nil || !record.Missing || record.Enabled || record.hasUI() {
+		t.Fatalf("missing placeholder = %+v", record)
+	}
+	if err := l.persist(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(ConfigPath(l.exeDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &l.cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(l.cfg.Plugins) != 1 || l.cfg.Plugins[0].Path != path || l.cfg.Plugins[0].UIPath != uiPath || l.cfg.Plugins[0].Enabled {
+		t.Fatalf("saved placeholder = %+v", l.cfg.Plugins)
+	}
+	writeFile(t, path, "restored DLL")
+	writeFile(t, filepath.Join(uiPath, "index.html"), "restored UI")
+	l.rebuildRecords()
+	record = l.plugins[FromPath(path)]
+	if record == nil || record.Missing || record.Enabled || !record.hasUI() {
+		t.Fatalf("recovered plugin = %+v", record)
+	}
+}
 
 func TestImportTogglePersistAndRemove(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())

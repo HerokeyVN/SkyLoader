@@ -97,7 +97,7 @@ type Launcher struct {
 	version  string
 	cfg      Config
 	server   *uiserver.Server
-	client   *uiserver.Client
+	client   bootstrapClient
 	logger   *log.Logger
 
 	emit      func(name string, data ...any)
@@ -120,6 +120,16 @@ type Launcher struct {
 	stop     chan struct{}
 	stopOnce sync.Once
 	done     chan struct{}
+}
+
+// bootstrapClient allows lifecycle failures to be tested without a game process.
+type bootstrapClient interface {
+	Load(string) error
+	Unload(string) error
+	List() ([]string, error)
+	Ping() error
+	UI(string, []byte) ([]byte, error)
+	Poll(string) ([][]byte, error)
 }
 
 // New loads settings, discovers the managed plugin store, starts the local UI
@@ -319,7 +329,10 @@ func (l *Launcher) saveConfig(status string, edit func(*Config)) error {
 func (l *Launcher) persist() error {
 	l.saveMu.Lock()
 	defer l.saveMu.Unlock()
+	return l.persistLocked()
+}
 
+func (l *Launcher) persistLocked() error {
 	l.mu.RLock()
 	cfg := l.cfg
 	records := l.recordsLocked()

@@ -738,10 +738,16 @@ func (l *Launcher) loadRegisteredRecords(enabledByPath, managedDLLs map[string]b
 		}
 		if !isRegularFile(path) {
 			l.logger.Printf("registered plugin is missing: %s", path)
-			continue
 		}
 		record := recordForDLL(path)
+		record.Missing = !isRegularFile(path)
 		record.Enabled = entry.Enabled
+		if entry.UIPath != "" {
+			record.UIDir = entry.UIPath
+			if !record.Missing && isRegularFile(filepath.Join(entry.UIPath, "index.html")) {
+				record.UIEntry = "index.html"
+			}
+		}
 		if record.Name == "" {
 			record.Name = DisplayName(path)
 		}

@@ -110,10 +110,14 @@ func writeAtomic(pattern, destination string, data []byte) error {
 		temp.Close()
 		return err
 	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempName, destination)
+	return replaceFile(tempName, destination)
 }
 
 // copyFile overwrites one file, creating parent directories as needed.

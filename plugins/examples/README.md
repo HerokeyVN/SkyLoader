@@ -88,3 +88,17 @@ skyplugin::stringOr("key", "") / numberOr / boolOr / at / item / size
 The samples are the spec for how to wire values into a real handler; the full
 reference for the host side of the same exchange is
 [`docs/creating-a-plugin.md`](../../docs/creating-a-plugin.md).
+
+## Regression tests
+
+Run from the repository root on Windows with Zig and Node.js on PATH:
+
+```powershell
+./plugins/examples/tests/run-native.ps1  # optional: -Zig C:/tools/zig/zig.exe
+node --test plugins/examples/tests/frontend-test.cjs
+```
+
+The native tests call the actual sample handlers and JSON parser. The page
+tests run the UI scripts with a simulated DOM and bridge. They cover invalid
+indices, failed patches, null lookups, numeric overflow, volume input, and
+schedule/path response reconciliation without requiring a running game.
